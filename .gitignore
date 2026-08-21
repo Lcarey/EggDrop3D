@@ -1,0 +1,13 @@
+node_modules/
+dist/
+coverage/
+.vite/
+.env
+.env.local
+*.log
+*.tsbuildinfo
+.DS_Store
+cdk.out/
+infra/cdk-outputs.json
+playwright-report/
+test-results/

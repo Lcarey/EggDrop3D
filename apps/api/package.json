@@ -1,0 +1,33 @@
+{
+  "name": "@eggdrop/api",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "main": "dist/lambda.mjs",
+  "scripts": {
+    "build": "esbuild src/lambda.ts --bundle --platform=node --target=node24 --format=esm --outfile=dist/lambda.mjs --sourcemap --banner:js=\"import { createRequire } from 'module'; const require = createRequire(import.meta.url);\" --external:@aws-sdk/*",
+    "dev": "node --import tsx --watch src/local.ts",
+    "start:local": "node --import tsx src/local.ts",
+    "pretypecheck": "npm run build -w @eggdrop/shared --prefix ../..",
+    "typecheck": "tsc --noEmit -p tsconfig.json",
+    "pretest": "npm run build -w @eggdrop/shared --prefix ../..",
+    "test": "vitest run",
+    "test:watch": "vitest"
+  },
+  "dependencies": {
+    "@aws-sdk/client-dynamodb": "^3.883.0",
+    "@aws-sdk/lib-dynamodb": "^3.883.0",
+    "@eggdrop/shared": "*",
+    "@hono/node-server": "^1.19.1",
+    "hono": "^4.9.6",
+    "zod": "^4.1.5"
+  },
+  "devDependencies": {
+    "@types/aws-lambda": "^8.10.152",
+    "@types/node": "^22.18.1",
+    "esbuild": "^0.25.9",
+    "tsx": "^4.20.5",
+    "typescript": "^5.9.2",
+    "vitest": "^3.2.4"
+  }
+}

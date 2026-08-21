@@ -1,0 +1,32 @@
+{
+  "name": "egg-drop-3d",
+  "version": "0.1.0",
+  "private": true,
+  "description": "A playful 3D STEM egg-drop builder and physics simulator",
+  "workspaces": [
+    "apps/*",
+    "packages/*",
+    "infra"
+  ],
+  "scripts": {
+    "dev": "npm run build:shared && concurrently -n api,web -c magenta,cyan \"npm run dev:api\" \"npm run dev:web\"",
+    "dev:web": "npm run dev -w @eggdrop/web",
+    "dev:api": "npm run dev -w @eggdrop/api",
+    "build:shared": "npm run build -w @eggdrop/shared",
+    "build:api": "npm run build -w @eggdrop/api",
+    "build:web": "npm run build -w @eggdrop/web",
+    "build": "npm run build:shared && npm run build:api && npm run build:web",
+    "typecheck": "npm run typecheck -w @eggdrop/shared && npm run typecheck -w @eggdrop/api && npm run typecheck -w @eggdrop/web && npm run typecheck -w @eggdrop/infra",
+    "test": "npm run test -w @eggdrop/shared && npm run test -w @eggdrop/api && npm run test -w @eggdrop/web && npm run test -w @eggdrop/infra",
+    "test:e2e": "npm run test:e2e -w @eggdrop/web",
+    "synth": "npm run synth -w @eggdrop/infra",
+    "deploy": "./deploy.sh"
+  },
+  "engines": {
+    "node": ">=22"
+  },
+  "devDependencies": {
+    "concurrently": "^9.2.1",
+    "typescript": "^5.9.2"
+  }
+}

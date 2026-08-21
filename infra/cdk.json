@@ -1,0 +1,9 @@
+{
+  "app": "node --import tsx bin/app.ts",
+  "context": {
+    "@aws-cdk/aws-iam:minimizePolicies": true,
+    "@aws-cdk/core:checkSecretUsage": true,
+    "@aws-cdk/core:enablePartitionLiterals": true,
+    "@aws-cdk/core:target-partitions": ["aws", "aws-cn"]
+  }
+}
