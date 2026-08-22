@@ -23,22 +23,32 @@ export type GravityBodyId = (typeof GRAVITY_BODY_IDS)[number];
 
 export const DEFAULT_GRAVITY_BODY_ID: GravityBodyId = "earth";
 
+/**
+ * Atmospheric density at the "surface" (for the gas giants, at the 1-bar
+ * pressure level where their gravity figure is quoted). Drag, buoyancy, and
+ * wind all scale with this, so parachutes are useless on the airless Moon,
+ * barely work in Mars's wisp of CO2, and are dramatic in Venus's dense soup.
+ */
 export const GRAVITY_BODIES: Record<
   GravityBodyId,
-  { label: string; gravityMps2: number }
+  { label: string; gravityMps2: number; airDensityKgM3: number }
 > = {
-  moon: { label: "Moon", gravityMps2: 1.62 },
-  mars: { label: "Mars", gravityMps2: 3.72 },
-  venus: { label: "Venus", gravityMps2: 8.87 },
-  earth: { label: "Earth", gravityMps2: STANDARD_GRAVITY_MPS2 },
-  uranus: { label: "Uranus", gravityMps2: 8.69 },
-  neptune: { label: "Neptune", gravityMps2: 11.15 },
-  saturn: { label: "Saturn", gravityMps2: 10.44 },
-  jupiter: { label: "Jupiter", gravityMps2: 24.79 },
+  moon: { label: "Moon", gravityMps2: 1.62, airDensityKgM3: 0 },
+  mars: { label: "Mars", gravityMps2: 3.72, airDensityKgM3: 0.02 },
+  venus: { label: "Venus", gravityMps2: 8.87, airDensityKgM3: 65 },
+  earth: { label: "Earth", gravityMps2: STANDARD_GRAVITY_MPS2, airDensityKgM3: 1.225 },
+  uranus: { label: "Uranus", gravityMps2: 8.69, airDensityKgM3: 0.42 },
+  neptune: { label: "Neptune", gravityMps2: 11.15, airDensityKgM3: 0.45 },
+  saturn: { label: "Saturn", gravityMps2: 10.44, airDensityKgM3: 0.19 },
+  jupiter: { label: "Jupiter", gravityMps2: 24.79, airDensityKgM3: 0.16 },
 };
 
 export function gravityMps2ForBody(bodyId: GravityBodyId): number {
   return GRAVITY_BODIES[bodyId].gravityMps2;
+}
+
+export function airDensityKgM3ForBody(bodyId: GravityBodyId): number {
+  return GRAVITY_BODIES[bodyId].airDensityKgM3;
 }
 export const SEA_LEVEL_AIR_DENSITY_KG_M3 = 1.225;
 export const DEFAULT_SNAP_METERS = 0.05;
@@ -167,6 +177,43 @@ export function calculatePartMassKg(
   return (
     calculateBoxVolumeM3(dimensions) *
     MATERIAL_BY_ID[materialId].physics.densityKgM3
+  );
+}
+
+export function calculateEllipsoidVolumeM3(dimensions: Readonly<Vec3>): number {
+  return (Math.PI / 6) * calculateBoxVolumeM3(dimensions);
+}
+
+/**
+ * Hydrodynamic added mass of an ellipsoidal body accelerating through air:
+ * the classic potential-flow result for a sphere is half the displaced fluid
+ * mass. A balloon must shove this air aside to accelerate, so its inertia is
+ * its structural mass plus this term — the physical replacement for an
+ * arbitrary simulated-mass floor. Scales with the local atmosphere, so it
+ * correctly vanishes in vacuum.
+ */
+export function calculateAddedAirMassKg(
+  dimensions: Readonly<Vec3>,
+  airDensityKgM3 = SEA_LEVEL_AIR_DENSITY_KG_M3,
+): number {
+  assertNonNegativeFinite(airDensityKgM3, "airDensityKgM3");
+  return 0.5 * airDensityKgM3 * calculateEllipsoidVolumeM3(dimensions);
+}
+
+/**
+ * The inertial (simulated) mass of a balloon: latex plus enclosed gas (the
+ * catalog's effective density already folds both into the box-volume
+ * contract) plus the added mass of the air it displaces when accelerating.
+ * Gravity must NOT act on the added-mass term — apply weight explicitly from
+ * the real mass with the body's gravity scale disabled.
+ */
+export function calculateBalloonSimMassKg(
+  dimensions: Readonly<Vec3>,
+  airDensityKgM3 = SEA_LEVEL_AIR_DENSITY_KG_M3,
+): number {
+  return (
+    calculatePartMassKg("balloon", dimensions) +
+    calculateAddedAirMassKg(dimensions, airDensityKgM3)
   );
 }
 

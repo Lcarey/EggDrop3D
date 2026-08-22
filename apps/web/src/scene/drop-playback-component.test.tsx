@@ -119,6 +119,8 @@ vi.mock("@react-three/drei", async () => {
   return {
     Billboard: () => null,
     ContactShadows: () => null,
+    Environment: () => null,
+    Lightformer: () => null,
     Line: () => null,
     OrbitControls,
     PerspectiveCamera: () => React.createElement("div", { "data-testid": "drop-camera" }),

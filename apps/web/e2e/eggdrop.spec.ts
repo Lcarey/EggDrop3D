@@ -37,9 +37,9 @@ test("inventory and continuous height controls are complete", async ({ page }) =
   await expect(gravitySlider).toHaveAttribute("max", "7");
   await expect(gravitySlider).toHaveAttribute("step", "1");
   await gravitySlider.fill("0");
-  await expect(dialog.getByText("Moon", { exact: true })).toBeVisible();
+  await expect(dialog.locator(".playback-heading strong").filter({ hasText: "Moon" })).toBeVisible();
   await gravitySlider.fill("7");
-  await expect(dialog.getByText("Jupiter", { exact: true })).toBeVisible();
+  await expect(dialog.locator(".playback-heading strong").filter({ hasText: "Jupiter" })).toBeVisible();
 
   const speedSlider = dialog.getByRole("slider", { name: "Drop playback speed" });
   await expect(speedSlider).toHaveAttribute("min", "0.1");

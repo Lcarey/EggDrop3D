@@ -1,5 +1,6 @@
 import { Billboard, ContactShadows, Line, OrbitControls, PerspectiveCamera, Text } from "@react-three/drei";
 import { Canvas, useFrame } from "@react-three/fiber";
+import { LabEnvironment, LandingGround } from "./scenery";
 import {
   BallCollider,
   CapsuleCollider,
@@ -1102,6 +1103,8 @@ function DropWorld({ design, running, playbackRate, gravityMps2, onComplete }: O
       <ambientLight intensity={1.1} />
       <hemisphereLight args={["#ecfbff", "#6a795b", 1.35]} />
       <directionalLight position={[4, 12, 5]} intensity={2.25} castShadow shadow-mapSize={[1024, 1024]} />
+      <LabEnvironment />
+      <LandingGround radiusM={1.8} yM={0.006} />
       <DropTower heightM={Math.max(16, offset + 2)} maxHeightFt={MAX_DROP_HEIGHT_FT} />
       {/*
         Contraptions routinely stack a heavy panel (~1.6 kg cardboard) on
@@ -1152,7 +1155,7 @@ function DropWorld({ design, running, playbackRate, gravityMps2, onComplete }: O
         <DropJointLines design={design} poses={poses} />
         <MonitorBridge design={design} refs={refs} eggRef={refs.egg!} running={running} playbackRate={playbackRate} gravityMps2={gravityMps2} onComplete={onComplete} setCracked={setCracked} handlers={monitorHandlers} />
       </Physics>
-      <ContactShadows position={[0, .01, 0]} opacity={.38} scale={5} blur={2.4} far={4} />
+      <ContactShadows position={[0, .01, 0]} opacity={.38} scale={5} blur={2.4} far={4} resolution={256} />
     </>
   );
 }
@@ -1459,7 +1462,7 @@ export function DropScene({ design, runId, running, playbackRate, gravityMps2, o
       key={runId}
       shadows
       dpr={[1, 1.55]}
-      gl={{ antialias: true }}
+      gl={{ antialias: true, stencil: false, powerPreference: "high-performance" }}
       fallback={<div className="webgl-fallback" role="alert"><span>🥚</span><strong>3D graphics are unavailable</strong><p>Enable WebGL or try a current browser to run this drop.</p></div>}
     >
       <Suspense fallback={null}><DropWorld design={design} running={running} playbackRate={normalizedPlaybackRate} gravityMps2={gravityMps2} onComplete={onComplete} /></Suspense>

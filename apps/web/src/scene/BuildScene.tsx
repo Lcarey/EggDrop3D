@@ -7,6 +7,7 @@ import { Group, PerspectiveCamera as ThreePerspectiveCamera, Quaternion, Vector3
 import { DEFAULT_DIMENSIONS, useEditorStore, getBodyTransform } from "../editor/store";
 import { MATERIAL_VISUALS } from "../editor/materialVisuals";
 import { EggVisual, PartVisual } from "./PartVisual";
+import { LabEnvironment, LandingGround } from "./scenery";
 
 type BuildSceneProps = { editable: boolean; fitNonce: number };
 type SolidMaterialId = keyof typeof DEFAULT_DIMENSIONS;
@@ -247,13 +248,15 @@ function BuildWorld({ editable, fitNonce }: BuildSceneProps) {
       <ambientLight intensity={1.15} />
       <hemisphereLight args={["#e7f9ff", "#627856", 1.25]} />
       <directionalLight position={[2.6, 4, 2]} intensity={2.1} castShadow shadow-mapSize={[1024, 1024]} />
+      <LabEnvironment />
+      <LandingGround radiusM={0.55} yM={-0.0035} />
       <Grid position={[0, -.004, 0]} args={[2.5, 2.5]} cellSize={.05} sectionSize={.25} cellColor="#76a3aa" sectionColor="#477986" fadeDistance={3} fadeStrength={1.5} infiniteGrid />
       <PlacementPlane editable={editable} />
       <EditableBody editable={editable} setOrbitEnabled={setOrbitEnabled} />
       {parts.map((part) => <EditableBody key={part.id} part={part} editable={editable} setOrbitEnabled={setOrbitEnabled} />)}
       <JointLines />
       <SnapEndMarker />
-      <ContactShadows position={[0, .002, 0]} opacity={.32} scale={2.2} blur={2.6} far={1.3} />
+      <ContactShadows position={[0, .002, 0]} opacity={.32} scale={2.2} blur={2.6} far={1.3} resolution={256} />
       <OrbitControls enabled={orbitEnabled} makeDefault target={[0, .25, 0]} minDistance={.45} maxDistance={4} minPolarAngle={.15} maxPolarAngle={Math.PI / 2.04} />
     </>
   );
@@ -263,8 +266,12 @@ export function BuildScene(props: BuildSceneProps) {
   return (
     <Canvas
       shadows
+      // The build stage is static between interactions; render frames only when
+      // something invalidates (camera, gizmos, store-driven React updates)
+      // instead of burning GPU at 60fps while the user thinks.
+      frameloop="demand"
       dpr={[1, 1.65]}
-      gl={{ antialias: true, alpha: false }}
+      gl={{ antialias: true, alpha: false, stencil: false, powerPreference: "high-performance" }}
       fallback={<div className="webgl-fallback" role="alert"><span>🥚</span><strong>3D graphics are unavailable</strong><p>Enable WebGL or try a current browser to build and drop this design.</p></div>}
     >
       <Suspense fallback={null}><BuildWorld {...props} /></Suspense>
