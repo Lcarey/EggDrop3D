@@ -8,10 +8,12 @@ import {
   CylinderCollider,
   Physics,
   RigidBody,
+  useAfterPhysicsStep,
   useBeforePhysicsStep,
   useFixedJoint,
   useRapier,
   useRopeJoint,
+  useSphericalJoint,
   useSpringJoint,
   type RapierRigidBody,
   type ContactForcePayload,
@@ -20,6 +22,7 @@ import {
 } from "@react-three/rapier";
 import {
   MATERIAL_BY_ID,
+  calculateBalloonSimMassKg,
   calculateBuoyantForceN,
   calculateDragForce,
   calculateMissionScore,
@@ -32,6 +35,16 @@ import {
   type DropResult,
   type MaterialId,
 } from "@eggdrop/shared";
+import { calculateImplicitSpinDragTorque, calculateProjectedDrag } from "./aero";
+import { BALLOON_MAX_REACTION_MPS2, calculatePneumaticContactForceN } from "./balloonContact";
+import {
+  MIN_SEGMENTED_ROPE_LENGTH_M,
+  ROPE_SEGMENT_RADIUS_M,
+  planRopeChain,
+  type RopeSegmentLayout,
+} from "./ropeChain";
+import { classifyBodyMotion, maxPlausibleSpeedMps } from "./watchdog";
+import { createWindField, type WindField } from "./wind";
 import { Suspense, createRef, useEffect, useMemo, useRef, useState, type ComponentRef, type RefObject } from "react";
 import { BufferGeometry, Quaternion, TOUCH, Vector3, type Group } from "three";
 import { DEFAULT_DROP_PLAYBACK_RATE, normalizeDropPlaybackRate } from "../dropPlayback";
@@ -61,10 +74,10 @@ type DropSceneProps = {
   running: boolean;
   playbackRate: number;
   gravityMps2: number;
+  airDensityKgM3: number;
   onComplete: (result: DropResult) => void;
 };
 
-const AIR_DENSITY = 1.225;
 const EGG_MASS_KG = .057;
 
 /** A body joined (directly or transitively) to a plastic bag, with its mass. */
@@ -72,36 +85,23 @@ type BagLoadEntry = { bodyId: string; massKg: number };
 type BagLoad = { entries: BagLoadEntry[]; refs: BodyRefs };
 
 /**
- * Deterministic low-frequency gusts in m/s (horizontal only, so drop timing
- * is untouched). Real air is never perfectly still; without a lateral nudge a
- * statically unstable build — e.g. a heavy egg balanced on top of a draggy
- * sheet — balances on its unstable equilibrium all the way down because the
- * simulation is otherwise perfectly symmetric. The amplitude is a light
- * breeze: the resulting force scales with each body's drag area, so big
- * sheets get rocked while a bare egg barely feels it.
- */
-export const calculateGustVelocityMps = (timeSeconds: number): [number, number, number] => [
-  .28 * Math.sin(timeSeconds * 1.1 + .9) + .18 * Math.sin(timeSeconds * 2.6 + 4.2),
-  0,
-  .28 * Math.sin(timeSeconds * 1.5 + 2.4) + .18 * Math.sin(timeSeconds * 3.1 + 1.1),
-];
-
-/**
- * Air velocity relative to the body, including gusts. The gust contribution
- * fades out below ~1 m/s of body speed so settled bodies feel still air and
- * can sleep instead of being dragged across the ground.
+ * Air velocity of the body relative to the wind at its altitude. Real air is
+ * never perfectly still; without a lateral nudge a statically unstable build
+ * — e.g. a heavy egg balanced on top of a draggy sheet — balances on its
+ * unstable equilibrium all the way down because the simulation is otherwise
+ * perfectly symmetric. The wind field's log-law profile is zero at ground
+ * level, so settled bodies feel still air and can sleep.
  */
 const relativeAirVelocity = (
   velocity: { x: number; y: number; z: number },
-  speed: number,
-  timeSeconds: number,
+  wind: WindField,
+  heightM: number,
 ): [number, number, number] => {
-  const gust = calculateGustVelocityMps(timeSeconds);
-  const envelope = Math.min(1, speed / 1.2);
+  const gust = wind.velocityAt(heightM);
   return [
-    velocity.x - gust[0] * envelope,
-    velocity.y - gust[1] * envelope,
-    velocity.z - gust[2] * envelope,
+    velocity.x - gust[0],
+    velocity.y - gust[1],
+    velocity.z - gust[2],
   ];
 };
 
@@ -247,35 +247,42 @@ function PartCollider({ part, mass }: { part: DesignPartV1; mass: number }) {
   }
 }
 
-function AerodynamicForces({ bodyRef, materialId, dimensions, gravityMps2, load }: { bodyRef: RefObject<RapierRigidBody>; materialId: MaterialId; dimensions: [number, number, number]; gravityMps2: number; load?: BagLoad }) {
-  const elapsed = useRef(0);
+function AerodynamicForces({ bodyRef, materialId, dimensions, gravityMps2, airDensityKgM3, wind, load }: { bodyRef: RefObject<RapierRigidBody>; materialId: MaterialId; dimensions: [number, number, number]; gravityMps2: number; airDensityKgM3: number; wind: WindField; load?: BagLoad }) {
+  const realMassKg = Math.max(.001, calculatePartMassKg(materialId, dimensions));
+  // Balloons carry the air inside them plus the "added mass" of air they
+  // shove aside; simulating that inertia (instead of a hand-tuned floor)
+  // keeps the mass ratio against heavy payloads physical.
+  const simMassKg = materialId === "balloon"
+    ? calculateBalloonSimMassKg(dimensions, airDensityKgM3)
+    : realMassKg;
   useBeforePhysicsStep(() => {
     const body = bodyRef.current;
     if (!body) return;
-    elapsed.current += DROP_FIXED_STEP_SECONDS;
     body.resetForces(false);
     body.resetTorques(false);
-    // Rotational air drag. Real panels flutter against big rotational
-    // resistance; without this a thin body can wind up unbounded spin from
-    // repeated contact impulses and slice through the scene like a saw blade.
-    // Capped against the body's smallest moment of inertia to keep the
-    // explicit integration stable for tiny parts.
+    // Rotational air drag, solved implicitly so a single step can never
+    // overshoot or reverse the spin. Real panels flutter against big
+    // rotational resistance; without this a thin body can wind up unbounded
+    // spin from repeated contact impulses and slice through the scene like a
+    // saw blade.
+    const rotation = body.rotation();
+    const rotationQuat: [number, number, number, number] = [rotation.x, rotation.y, rotation.z, rotation.w];
     const spin = body.angvel();
-    const [dx, dy, dz] = dimensions;
-    const mass = materialId === "balloon"
-      ? Math.max(BALLOON_MIN_SIM_MASS_KG, calculatePartMassKg(materialId, dimensions))
-      : Math.max(.001, calculatePartMassKg(materialId, dimensions));
-    const sorted = [dx, dy, dz].sort((a, b) => a - b);
-    const minInertia = mass * (sorted[0]! ** 2 + sorted[1]! ** 2) / 12;
-    const spinDrag = Math.min(
-      minInertia * 25,
-      .6 * MATERIAL_BY_ID[materialId].physics.dragCoefficient * Math.max(dx * dy, dx * dz, dy * dz),
-    );
-    body.addTorque({ x: -spin.x * spinDrag, y: -spin.y * spinDrag, z: -spin.z * spinDrag }, true);
+    const spinTorque = calculateImplicitSpinDragTorque({
+      angularVelocityRps: [spin.x, spin.y, spin.z],
+      rotation: rotationQuat,
+      dimensions,
+      massKg: simMassKg,
+      dragCoefficient: MATERIAL_BY_ID[materialId].physics.dragCoefficient,
+      airDensityKgM3,
+      dtSeconds: DROP_FIXED_STEP_SECONDS,
+    });
+    body.addTorque({ x: spinTorque[0], y: spinTorque[1], z: spinTorque[2] }, true);
     const velocity = body.linvel();
-    const speed = Math.hypot(velocity.x, velocity.y, velocity.z);
-    if (speed > .01) {
-      const airVelocity = relativeAirVelocity(velocity, speed, elapsed.current);
+    const center = body.translation();
+    const airVelocity = relativeAirVelocity(velocity, wind, center.y);
+    const airSpeed = Math.hypot(airVelocity[0], airVelocity[1], airVelocity[2]);
+    if (airSpeed > .01) {
       if (materialId === "plasticBag") {
         // Parachute model: a descending bag billows into a canopy with far
         // more drag than a flat sheet, and the force applies at the dome's
@@ -283,9 +290,7 @@ function AerodynamicForces({ bodyRef, materialId, dimensions, gravityMps2, load 
         // self-rights canopy-up instead of tumbling. A joined payload whose
         // centre of mass rides above the sheet blocks that inflation, so an
         // egg perched on top of a bag gets no parachute.
-        const rotation = body.rotation();
         const normal = new Vector3(0, 1, 0).applyQuaternion(new Quaternion(rotation.x, rotation.y, rotation.z, rotation.w));
-        const center = body.translation();
         let supportedLoadHeightM = 0;
         if (load) {
           let totalKg = 0;
@@ -303,7 +308,7 @@ function AerodynamicForces({ bodyRef, materialId, dimensions, gravityMps2, load 
           canopyNormal: [normal.x, normal.y, normal.z],
           dimensions,
           dragCoefficient: MATERIAL_BY_ID.plasticBag.physics.dragCoefficient,
-          airDensityKgM3: AIR_DENSITY,
+          airDensityKgM3,
           supportedLoadHeightM,
         });
         body.addForceAtPoint(
@@ -316,14 +321,26 @@ function AerodynamicForces({ bodyRef, materialId, dimensions, gravityMps2, load 
           true,
         );
       } else {
-        const area = Math.max(dimensions[0] * dimensions[1], dimensions[0] * dimensions[2], dimensions[1] * dimensions[2]);
-        const drag = calculateDragForce({
+        // Attitude-dependent drag: the flow-projected area of the oriented
+        // box, applied at the centre of pressure (leading toward the upstream
+        // edge for oblique flow) so tilted sheets feel real flutter/tumble
+        // torque instead of a pure force through the centroid.
+        const drag = calculateProjectedDrag({
           velocityMps: airVelocity,
+          rotation: rotationQuat,
+          dimensions,
           dragCoefficient: MATERIAL_BY_ID[materialId].physics.dragCoefficient,
-          crossSectionAreaM2: area,
-          airDensityKgM3: AIR_DENSITY,
+          airDensityKgM3,
         });
-        body.addForce({ x: drag[0], y: drag[1], z: drag[2] }, true);
+        body.addForceAtPoint(
+          { x: drag.forceN[0], y: drag.forceN[1], z: drag.forceN[2] },
+          {
+            x: center.x + drag.applicationOffsetM[0],
+            y: center.y + drag.applicationOffsetM[1],
+            z: center.z + drag.applicationOffsetM[2],
+          },
+          true,
+        );
       }
     }
     if (materialId === "balloon") {
@@ -335,48 +352,38 @@ function AerodynamicForces({ bodyRef, materialId, dimensions, gravityMps2, load 
       const buoyancy = calculateBuoyantForceN({
         volumeM3: dimensions[0] * dimensions[1] * dimensions[2],
         buoyancyFactor: MATERIAL_BY_ID.balloon.physics.buoyancyFactor,
+        airDensityKgM3,
         gravityMps2,
       });
-      // Cancel gravity on the artificial inertia floor so the balloon still
-      // weighs what real latex weighs while colliding like it has air inside.
-      const realMass = Math.max(.001, calculatePartMassKg("balloon", dimensions));
-      const gravityCompensation = Math.max(0, BALLOON_MIN_SIM_MASS_KG - realMass) * gravityMps2;
+      // Cancel gravity on the added air inertia: the air a balloon carries is
+      // neutrally buoyant, so it adds inertia but no net weight.
+      const gravityCompensation = Math.max(0, simMassKg - realMassKg) * gravityMps2;
       body.addForce({ x: 0, y: buoyancy + gravityCompensation, z: 0 }, true);
     }
   });
   return null;
 }
 
-/**
- * Simulated balloon inertia floor. The latex alone weighs ~10 g, but a moving
- * balloon also carries the air inside it plus the "added mass" of air it
- * shoves aside, and a ~1:140 mass ratio against a cardboard payload makes the
- * rigid-body solver eject balloons like watermelon seeds. The extra inertia
- * is cancelled out of gravity in AerodynamicForces so weight and lift are
- * unchanged.
- */
-const BALLOON_MIN_SIM_MASS_KG = .09;
-
-const BALLOON_COLUMN_STIFFNESS = 700;
-const BALLOON_COLUMN_DAMPING = 20;
-const BALLOON_COLUMN_MAX_FORCE = 60;
-const BALLOON_REACTION_MAX_FORCE = 3;
-const BALLOON_SELF_SPRING = 90;
-const BALLOON_SELF_DAMPING = 1.6;
+/** Lateral scrub while the balloon's soft shell touches the ground. */
 const BALLOON_GROUND_DRAG = .8;
+/**
+ * Coulomb friction coefficient for the balloon shell: latex on cardboard or
+ * grass is grippy (~0.6). The pneumatic shell force is a pure normal push;
+ * without a tangential component, nothing holds a loose balloon under its
+ * payload, so a landing raft see-saws and squirts its cushion out sideways.
+ */
+const BALLOON_SHELL_FRICTION = .6;
 
 const BALL_APPROX_MATERIALS = new Set<MaterialId>(["balloon", "cottonBall", "newspaper", "packingPeanuts", "paperCup"]);
 
 /**
- * Squishy-balloon model. Bodies pressing down into the soft outer shell of a
- * ground-backed balloon are held up by a spring-damper "air column" anchored
- * to the ground, so a balloon raft decelerates its payload over the shell's
- * compression stroke like a real balloon instead of stopping it in a single
- * physics step. Spring stiffness is capped per target mass to keep the
- * explicit integration stable, and light balloons receive no reaction force
- * (the ground supplies it), which avoids the huge-mass-ratio impulses that
- * ejected balloons sideways. A gentle self-spring keeps an unloaded balloon
- * resting at its full visual radius rather than sinking to its rigid core.
+ * Squishy-balloon model. The outer shell between the rigid core and the
+ * visual radius is a pneumatic compliant contact: internal gauge pressure
+ * times the growing sphere-plane contact patch, stiffening as the stroke is
+ * used up, with the step solved implicitly (backward Euler on the contact
+ * DOF). Unlike the hand-tuned one-way springs and force caps this replaces,
+ * it is unconditionally stable at any mass ratio, conserves momentum
+ * (equal-and-opposite application), and cannot trampoline.
  */
 function BalloonSuspension({ design, refs }: { design: DesignV1; refs: BodyRefs }) {
   const balloons = useMemo(
@@ -405,19 +412,42 @@ function BalloonSuspension({ design, refs }: { design: DesignV1; refs: BodyRefs 
       const body = refs[balloon.id]?.current;
       if (!body) continue;
       const radius = balloon.radius;
+      const shellDepthM = radius * (1 - BALLOON_CORE_RATIO);
       const center = body.translation();
       const balloonVelocity = body.linvel();
-      const grounded = center.y < radius * 1.6;
+      const balloonMass = body.mass();
+      // A ground-backed balloon is a pinched gas column: the ground supplies
+      // the reaction, so the column decelerates the payload against the
+      // ground's infinite mass rather than against the balloon's few grams.
+      const groundBacked = center.y < radius * 1.6;
 
-      if (grounded) {
-        // Hold the balloon itself at its visual radius and scrub lateral
-        // sliding. Like the payload columns, the spring fades while the
-        // balloon moves up so it absorbs landings instead of trampolining.
-        const selfRelease = balloonVelocity.y > 0 ? Math.max(0, 1 - balloonVelocity.y / .3) : 1;
-        const selfLift = Math.max(0,
-          BALLOON_SELF_SPRING * (radius - center.y) * selfRelease
-          + BALLOON_SELF_DAMPING * Math.max(0, -balloonVelocity.y));
-        body.addForce({ x: -balloonVelocity.x * BALLOON_GROUND_DRAG, y: selfLift, z: -balloonVelocity.z * BALLOON_GROUND_DRAG }, true);
+      // Ground contact: the shell squashes against the floor. The floor is
+      // immovable, so the pair's reduced mass is just the balloon's own.
+      const groundPenetration = radius - center.y;
+      if (groundPenetration > 0) {
+        // Signed approach speed: the damper must also act while the shell
+        // rebounds, or the stored gas-spring energy returns in full and the
+        // balloon trampolines its payload.
+        const groundForce = calculatePneumaticContactForceN({
+          penetrationM: groundPenetration,
+          shellDepthM,
+          balloonRadiusM: radius,
+          approachSpeedMps: -balloonVelocity.y,
+          reducedMassKg: Math.max(1e-4, balloonMass),
+          dtSeconds: DROP_FIXED_STEP_SECONDS,
+        });
+        // Load-proportional Coulomb friction plus a small viscous scrub. The
+        // friction is clamped so it can only arrest the slip within the step,
+        // never reverse it (which would jitter).
+        const slipSpeed = Math.hypot(balloonVelocity.x, balloonVelocity.z);
+        const stoppingForceN = (balloonMass * slipSpeed) / DROP_FIXED_STEP_SECONDS;
+        const frictionN = Math.min(BALLOON_SHELL_FRICTION * Math.max(0, groundForce), stoppingForceN);
+        const frictionScale = slipSpeed > 1e-6 ? frictionN / slipSpeed : 0;
+        body.addForce({
+          x: -balloonVelocity.x * (BALLOON_GROUND_DRAG + frictionScale),
+          y: groundForce,
+          z: -balloonVelocity.z * (BALLOON_GROUND_DRAG + frictionScale),
+        }, true);
       }
 
       const centerVec = new Vector3(center.x, center.y, center.z);
@@ -444,81 +474,106 @@ function BalloonSuspension({ design, refs }: { design: DesignV1; refs: BodyRefs 
         const delta = centerVec.clone().sub(closest);
         const distance = delta.length();
         if (distance < 1e-6 || distance >= radius) continue;
+        // Normal points from the target's surface toward the balloon centre;
+        // the gas pushes the target away along -normal.
         const normal = delta.clone().divideScalar(distance);
-        // Only support bodies pressing down from above; side/below contacts
-        // stay on the rigid core.
+        // Only support bodies pressing down from above. A glancing or lateral
+        // shell contact against a free balloon mostly deflects around it (the
+        // balloon rolls aside) rather than transmitting force; modelling only
+        // the load-bearing direction keeps loose cushions under their payload
+        // instead of squirting them out from under a tilting raft.
         if (normal.y > -.35) continue;
-        const mass = other.mass();
-        const damping = Math.min(BALLOON_COLUMN_DAMPING, mass * 40);
+        const penetrationM = radius - distance;
         const targetVelocity = other.linvel();
-
-        if (!grounded) {
-          // In flight, a pure damper keeps the payload from crushing the
-          // shell down to the rigid core. Damper-only means it can only
-          // remove relative-approach energy, so it cannot levitate anything,
-          // and it preserves the full spring stroke for touchdown. The equal
-          // and opposite reaction transmits the payload's weight down through
-          // the balloon so the assembly actually descends as a unit.
-          const closing = (targetVelocity.x - balloonVelocity.x) * normal.x
-            + (targetVelocity.y - balloonVelocity.y) * normal.y
-            + (targetVelocity.z - balloonVelocity.z) * normal.z;
-          // Gate on the target's own motion toward the balloon: a buoyant
-          // balloon drifting up into a resting payload must not "damp" the
-          // payload skyward (the asymmetric force caps would mint momentum).
-          const targetApproach = targetVelocity.x * normal.x + targetVelocity.y * normal.y + targetVelocity.z * normal.z;
-          const speed = Math.min(4, Math.max(0, Math.min(closing, targetApproach)));
-          const force = Math.min(BALLOON_COLUMN_MAX_FORCE, damping * speed);
-          if (force <= 0) continue;
-          const airPush = { x: -normal.x * force, y: -normal.y * force, z: -normal.z * force };
-          // Ball-shaped bodies get the force through their centre: a surface
-          // application point would torque their tiny rotational inertia.
-          if (target.ball) other.addForce(airPush, true);
-          else other.addForceAtPoint(airPush, { x: closest.x, y: closest.y, z: closest.z }, true);
-          // Cap the reaction by what the balloon's inertia can absorb in one
-          // step; transmitting the full transient would kick it away.
-          const reaction = Math.min(force, BALLOON_REACTION_MAX_FORCE);
-          body.addForceAtPoint(
-            { x: normal.x * reaction, y: normal.y * reaction, z: normal.z * reaction },
-            { x: closest.x, y: closest.y, z: closest.z },
-            true,
-          );
-          continue;
-        }
-
-        const stiffness = Math.min(BALLOON_COLUMN_STIFFNESS, mass * 2400);
-        // Stroke is capped at the squishable shell depth; beyond that the
-        // rigid core takes over.
-        const compression = Math.min(radius * .45, Math.max(0, radius * 2 - closest.y));
-        // Damp using the contact point's own vertical velocity (including
-        // rotation), not the centroid's: a tilting panel otherwise sees pure
-        // undamped springs on its pitch mode and see-saws itself to pieces.
+        // Approach speed of the contact point (including the target's spin —
+        // a tilting panel must see its pitch mode damped, or it see-saws).
         const angular = other.angvel();
-        const pointVerticalVelocity = targetVelocity.y
-          + angular.z * (closest.x - position.x)
-          - angular.x * (closest.z - position.z);
-        // Cap the damper's speed input so first contact at full descent speed
-        // ramps the force up over the stroke instead of spiking instantly.
-        const approach = Math.min(4, Math.max(0, -pointVerticalVelocity));
-        // A real balloon dissipates the squeeze (air escapes, latex
-        // hysteresis); returning the full spring energy turned the cushion
-        // into a trampoline. Fade the spring to zero as the contact point
-        // rises so the cushion is one-way: full support at rest and while
-        // compressing, no launch assist.
-        const releaseFactor = pointVerticalVelocity > 0 ? Math.max(0, 1 - pointVerticalVelocity / .3) : 1;
-        const force = Math.min(BALLOON_COLUMN_MAX_FORCE, stiffness * compression * releaseFactor + damping * approach);
+        const armX = closest.x - position.x;
+        const armY = closest.y - position.y;
+        const armZ = closest.z - position.z;
+        const pointVelocity = new Vector3(
+          targetVelocity.x + angular.y * armZ - angular.z * armY,
+          targetVelocity.y + angular.z * armX - angular.x * armZ,
+          targetVelocity.z + angular.x * armY - angular.y * armX,
+        );
+        const approachSpeedMps =
+          (pointVelocity.x - balloonVelocity.x) * normal.x
+          + (pointVelocity.y - balloonVelocity.y) * normal.y
+          + (pointVelocity.z - balloonVelocity.z) * normal.z;
+        const targetMass = Math.max(1e-4, other.mass());
+        const reducedMassKg = groundBacked
+          ? targetMass
+          : (targetMass * Math.max(1e-4, balloonMass)) / (targetMass + Math.max(1e-4, balloonMass));
+        const force = calculatePneumaticContactForceN({
+          penetrationM,
+          shellDepthM,
+          balloonRadiusM: radius,
+          approachSpeedMps,
+          reducedMassKg,
+          dtSeconds: DROP_FIXED_STEP_SECONDS,
+        });
         if (force <= 0) continue;
-        if (target.ball) other.addForce({ x: 0, y: force, z: 0 }, true);
-        else other.addForceAtPoint({ x: 0, y: force, z: 0 }, { x: closest.x, y: closest.y, z: closest.z }, true);
+        // Coulomb friction on the shell: oppose the tangential slip of the
+        // contact point, capped at mu*N and at the force that would arrest
+        // the slip within one step (so it can never reverse it). This is what
+        // keeps a loose cushion under a landing panel and damps see-sawing.
+        const relX = pointVelocity.x - balloonVelocity.x;
+        const relY = pointVelocity.y - balloonVelocity.y;
+        const relZ = pointVelocity.z - balloonVelocity.z;
+        const tangentX = relX - approachSpeedMps * normal.x;
+        const tangentY = relY - approachSpeedMps * normal.y;
+        const tangentZ = relZ - approachSpeedMps * normal.z;
+        const slipSpeedMps = Math.hypot(tangentX, tangentY, tangentZ);
+        let frictionX = 0;
+        let frictionY = 0;
+        let frictionZ = 0;
+        if (slipSpeedMps > 1e-6) {
+          const frictionN = Math.min(
+            BALLOON_SHELL_FRICTION * force,
+            (reducedMassKg * slipSpeedMps) / DROP_FIXED_STEP_SECONDS,
+          );
+          frictionX = (-tangentX / slipSpeedMps) * frictionN;
+          frictionY = (-tangentY / slipSpeedMps) * frictionN;
+          frictionZ = (-tangentZ / slipSpeedMps) * frictionN;
+        }
+        const push = {
+          x: -normal.x * force + frictionX,
+          y: -normal.y * force + frictionY,
+          z: -normal.z * force + frictionZ,
+        };
+        // Ball-shaped bodies get the force through their centre: a surface
+        // application point would torque their tiny rotational inertia.
+        if (target.ball) other.addForce(push, true);
+        else other.addForceAtPoint(push, { x: closest.x, y: closest.y, z: closest.z }, true);
+        // Reaction on the balloon, capped in acceleration: the membrane
+        // deflects locally long before the whole balloon is batted away at
+        // F/m of its few grams. The steady load share still comes through
+        // (it is well under the cap), so a pinched balloon is held down
+        // under its payload instead of extruding out; only the landing
+        // transient is absorbed by the membrane (and, when ground-backed,
+        // supplied by the ground) rather than kicking the latex away.
+        const reactionScale = Math.min(1, (balloonMass * BALLOON_MAX_REACTION_MPS2) / force);
+        body.addForceAtPoint(
+          {
+            x: (normal.x * force - frictionX) * reactionScale,
+            y: (normal.y * force - frictionY) * reactionScale,
+            z: (normal.z * force - frictionZ) * reactionScale,
+          },
+          { x: closest.x, y: closest.y, z: closest.z },
+          true,
+        );
       }
     }
   });
   return null;
 }
 
-function PhysicsPart({ part, offset, bodyRef, gravityMps2, load }: { part: DesignPartV1; offset: number; bodyRef: RefObject<RapierRigidBody>; gravityMps2: number; load?: BagLoad }) {
+function PhysicsPart({ part, offset, bodyRef, gravityMps2, airDensityKgM3, wind, load }: { part: DesignPartV1; offset: number; bodyRef: RefObject<RapierRigidBody>; gravityMps2: number; airDensityKgM3: number; wind: WindField; load?: BagLoad }) {
   const definition = MATERIAL_BY_ID[part.materialId];
   const realMass = Math.max(.001, calculatePartMassKg(part.materialId, part.transform.dimensions));
-  const mass = part.materialId === "balloon" ? Math.max(realMass, BALLOON_MIN_SIM_MASS_KG) : realMass;
+  const mass = part.materialId === "balloon"
+    ? calculateBalloonSimMassKg(part.transform.dimensions, airDensityKgM3)
+    : realMass;
   const contactAreaM2 = Math.max(
     part.transform.dimensions[0] * part.transform.dimensions[1],
     part.transform.dimensions[0] * part.transform.dimensions[2],
@@ -539,17 +594,15 @@ function PhysicsPart({ part, offset, bodyRef, gravityMps2, load }: { part: Desig
       userData={{ bodyId: part.id, materialId: part.materialId, contactAreaM2 }}
     >
       <PartCollider part={part} mass={mass} />
-      <AerodynamicForces bodyRef={bodyRef} materialId={part.materialId} dimensions={part.transform.dimensions} gravityMps2={gravityMps2} load={load} />
+      <AerodynamicForces bodyRef={bodyRef} materialId={part.materialId} dimensions={part.transform.dimensions} gravityMps2={gravityMps2} airDensityKgM3={airDensityKgM3} wind={wind} load={load} />
     </RigidBody>
   );
 }
 
-function EggAerodynamicForces({ bodyRef, dimensions }: { bodyRef: RefObject<RapierRigidBody>; dimensions: [number, number, number] }) {
-  const elapsed = useRef(0);
+function EggAerodynamicForces({ bodyRef, dimensions, airDensityKgM3, wind }: { bodyRef: RefObject<RapierRigidBody>; dimensions: [number, number, number]; airDensityKgM3: number; wind: WindField }) {
   useBeforePhysicsStep(() => {
     const body = bodyRef.current;
     if (!body) return;
-    elapsed.current += DROP_FIXED_STEP_SECONDS;
     body.resetForces(false);
     body.resetTorques(false);
     // Rolling resistance. The egg's rotational inertia is so tiny that
@@ -560,13 +613,13 @@ function EggAerodynamicForces({ bodyRef, dimensions }: { bodyRef: RefObject<Rapi
     const rollResistance = eggInertia * 30;
     body.addTorque({ x: -spin.x * rollResistance, y: -spin.y * rollResistance, z: -spin.z * rollResistance }, true);
     const velocity = body.linvel();
-    const speed = Math.hypot(velocity.x, velocity.y, velocity.z);
+    const center = body.translation();
     const area = Math.PI * dimensions[0] * dimensions[2] / 4;
     const drag = calculateDragForce({
-      velocityMps: relativeAirVelocity(velocity, speed, elapsed.current),
+      velocityMps: relativeAirVelocity(velocity, wind, center.y),
       dragCoefficient: .47,
       crossSectionAreaM2: area,
-      airDensityKgM3: AIR_DENSITY,
+      airDensityKgM3,
     });
     body.addForce({ x: drag[0], y: drag[1], z: drag[2] }, true);
   });
@@ -584,6 +637,14 @@ function FixedConnector({ joint, refs, design }: { joint: DesignJointV1; refs: B
   return null;
 }
 
+// NOTE on multibody joints: reduced-coordinate (multibody) fixed joints were
+// tried for taped/glued assemblies — they make assemblies exactly rigid by
+// construction instead of holding them together with corrective impulses.
+// Rapier's JS build panics ("RuntimeError: unreachable", then a poisoned
+// world) when a multibody tree coexists with impulse joints and CCD in the
+// same island, so welds stay impulse fixed joints; SolverTuning's extra
+// per-body iterations and the segmented tethers keep them well-conditioned.
+
 function RopeConnector({ joint, refs, design }: { joint: DesignJointV1; refs: BodyRefs; design: DesignV1 }) {
   const aTransform = transformForBody(design, joint.bodyA);
   const bTransform = transformForBody(design, joint.bodyB);
@@ -598,6 +659,167 @@ function SpringConnector({ joint, refs, design }: { joint: DesignJointV1; refs: 
   const length = Math.max(.04, worldAnchor(aTransform, joint.anchorA).distanceTo(worldAnchor(bTransform, joint.anchorB)));
   useSpringJoint(refs[joint.bodyA]!, refs[joint.bodyB]!, [joint.anchorA, joint.anchorB, length, 38, 3.8]);
   return null;
+}
+
+/** World-space distance between a joint's two anchors in the build pose. */
+const jointSpanM = (design: DesignV1, joint: DesignJointV1) =>
+  worldAnchor(transformForBody(design, joint.bodyA), joint.anchorA)
+    .distanceTo(worldAnchor(transformForBody(design, joint.bodyB), joint.anchorB));
+
+/** Collider approximation of any body (the egg included) in the build pose. */
+const buildShapeForBody = (design: DesignV1, bodyId: string): BuildPoseShape => {
+  if (bodyId === "egg") {
+    return {
+      kind: "sphere",
+      center: new Vector3(...design.eggTransform.position),
+      radius: Math.max(...design.eggTransform.dimensions) / 2,
+    };
+  }
+  return buildPoseShape(design.parts.find((part) => part.id === bodyId)!);
+};
+
+/**
+ * Approximate clearance between two build-pose shapes, metres (<= 0 when they
+ * touch or overlap). Box-box uses the largest separation over the SAT
+ * candidate axes, which lower-bounds the true gap — erring toward "closer",
+ * the safe direction for keeping welds rigid.
+ */
+const shapeGapM = (a: BuildPoseShape, b: BuildPoseShape): number => {
+  if (a.kind === "sphere" && b.kind === "sphere") {
+    return a.center.distanceTo(b.center) - a.radius - b.radius;
+  }
+  if (a.kind === "sphere" || b.kind === "sphere") {
+    const sphere = (a.kind === "sphere" ? a : b) as Extract<BuildPoseShape, { kind: "sphere" }>;
+    const box = (a.kind === "box" ? a : b) as Extract<BuildPoseShape, { kind: "box" }>;
+    return closestPointOnBox(sphere.center, box).distanceTo(sphere.center) - sphere.radius;
+  }
+  const boxA = a as Extract<BuildPoseShape, { kind: "box" }>;
+  const boxB = b as Extract<BuildPoseShape, { kind: "box" }>;
+  const delta = boxB.center.clone().sub(boxA.center);
+  const candidateAxes: Vector3[] = [...boxA.axes, ...boxB.axes];
+  for (const axisA of boxA.axes) {
+    for (const axisB of boxB.axes) {
+      const cross = axisA.clone().cross(axisB);
+      if (cross.lengthSq() > 1e-8) candidateAxes.push(cross.normalize());
+    }
+  }
+  let gap = Number.NEGATIVE_INFINITY;
+  for (const axis of candidateAxes) {
+    gap = Math.max(gap, Math.abs(delta.dot(axis)) - projectBoxOntoAxis(axis, boxA) - projectBoxOntoAxis(axis, boxB));
+  }
+  return gap;
+};
+
+/** Bodies must be at least this far apart before a connector is a tether. */
+const CHAIN_MIN_BODY_GAP_M = .05;
+
+/**
+ * Long connectors between separated bodies become segmented chains instead of
+ * one joint spanning the whole gap. A single metres-long constraint between
+ * very light bodies is massless, dragless, cannot sag or swing, and is
+ * exactly the ill-conditioned configuration that made balloon tethers
+ * diverge; a chain of short capsule links joined by spherical joints is many
+ * well-conditioned constraints with real mass. Long tape qualifies too: a
+ * strip of tape spanning a gap is a flexible tether in reality, not a rigid
+ * weld. Both the anchor span and the body gap must be large — tape between
+ * touching parts is a weld no matter where the anchor clicks landed.
+ */
+export const isChainedJoint = (design: DesignV1, joint: DesignJointV1): boolean => {
+  if (joint.kind !== "rope" && joint.kind !== "fixed") return false;
+  if (jointSpanM(design, joint) < MIN_SEGMENTED_ROPE_LENGTH_M) return false;
+  const gap = shapeGapM(buildShapeForBody(design, joint.bodyA), buildShapeForBody(design, joint.bodyB));
+  return gap >= CHAIN_MIN_BODY_GAP_M;
+};
+
+const chainSegmentId = (jointId: string, index: number) => `${jointId}#chain${index}`;
+
+type ChainPlans = Record<string, RopeSegmentLayout[]>;
+
+const calculateChainPlans = (design: DesignV1, offset: number): ChainPlans => {
+  const plans: ChainPlans = {};
+  for (const joint of design.joints) {
+    if (!isChainedJoint(design, joint)) continue;
+    const start = worldAnchor(transformForBody(design, joint.bodyA), joint.anchorA);
+    const end = worldAnchor(transformForBody(design, joint.bodyB), joint.anchorB);
+    plans[joint.id] = planRopeChain(
+      [start.x, start.y + offset, start.z],
+      [end.x, end.y + offset, end.z],
+      start.distanceTo(end),
+    );
+  }
+  return plans;
+};
+
+/** Spherical link with pair contacts suppressed (links overlap at the pins). */
+function ChainSphericalJoint({
+  refA,
+  refB,
+  anchorA,
+  anchorB,
+}: {
+  refA: RefObject<RapierRigidBody>;
+  refB: RefObject<RapierRigidBody>;
+  anchorA: [number, number, number];
+  anchorB: [number, number, number];
+}) {
+  const link = useSphericalJoint(refA, refB, [anchorA, anchorB]);
+  useEffect(() => {
+    link?.current?.setContactsEnabled(false);
+  }, [link]);
+  return null;
+}
+
+function SegmentedChainConnector({ joint, plan, refs }: { joint: DesignJointV1; plan: RopeSegmentLayout[]; refs: BodyRefs }) {
+  const totalLengthM = plan.reduce((sum, segment) => sum + segment.lengthM, 0);
+  // Real string/tape is a few grams per metre; floor keeps the solver happy.
+  const segmentMassKg = Math.max(.002, totalLengthM * .004 / plan.length);
+  return (
+    <>
+      {plan.map((segment, index) => {
+        const id = chainSegmentId(joint.id, index);
+        return (
+          <RigidBody
+            key={id}
+            ref={refs[id]}
+            colliders={false}
+            position={segment.position}
+            quaternion={segment.rotation}
+            linearDamping={.25}
+            angularDamping={.6}
+            ccd
+            canSleep
+            userData={{ bodyId: id, materialId: joint.materialId, contactAreaM2: 0 }}
+          >
+            <CapsuleCollider
+              args={[Math.max(.001, segment.lengthM / 2 - ROPE_SEGMENT_RADIUS_M), ROPE_SEGMENT_RADIUS_M]}
+              mass={segmentMassKg}
+            />
+          </RigidBody>
+        );
+      })}
+      <ChainSphericalJoint
+        refA={refs[joint.bodyA]!}
+        refB={refs[chainSegmentId(joint.id, 0)]!}
+        anchorA={joint.anchorA}
+        anchorB={[0, -plan[0]!.lengthM / 2, 0]}
+      />
+      {plan.slice(0, -1).map((segment, index) => (
+        <ChainSphericalJoint
+          key={`${joint.id}#link${index}`}
+          refA={refs[chainSegmentId(joint.id, index)]!}
+          refB={refs[chainSegmentId(joint.id, index + 1)]!}
+          anchorA={[0, segment.lengthM / 2, 0]}
+          anchorB={[0, -plan[index + 1]!.lengthM / 2, 0]}
+        />
+      ))}
+      <ChainSphericalJoint
+        refA={refs[chainSegmentId(joint.id, plan.length - 1)]!}
+        refB={refs[joint.bodyB]!}
+        anchorA={[0, plan[plan.length - 1]!.lengthM / 2, 0]}
+        anchorB={joint.anchorB}
+      />
+    </>
+  );
 }
 
 type BuildPoseShape =
@@ -716,6 +938,9 @@ export const calculateAssemblyContactPairs = (design: DesignV1): [string, string
   const pairKey = (a: string, b: string) => (a < b ? `${a}\0${b}` : `${b}\0${a}`);
   for (const joint of design.joints) {
     if (joint.kind !== "fixed") continue;
+    // A long tape tether is simulated as a flexible chain, not a weld, so it
+    // does not merge its endpoints into one rigid assembly.
+    if (isChainedJoint(design, joint)) continue;
     directlyJointed.add(pairKey(joint.bodyA, joint.bodyB));
     parent.set(find(joint.bodyA), find(joint.bodyB));
   }
@@ -751,12 +976,14 @@ function AssemblyContactSuppressor({ bodyA, bodyB, refs }: { bodyA: string; body
   return null;
 }
 
-function PhysicsConnectors({ design, refs }: { design: DesignV1; refs: BodyRefs }) {
+function PhysicsConnectors({ design, refs, chainPlans, brokenJointIds }: { design: DesignV1; refs: BodyRefs; chainPlans: ChainPlans; brokenJointIds: ReadonlySet<string> }) {
   const assemblyContactPairs = useMemo(() => calculateAssemblyContactPairs(design), [design]);
   return (
     <>
       {design.joints.map((joint) => {
         if (!refs[joint.bodyA] || !refs[joint.bodyB]) return null;
+        if (brokenJointIds.has(joint.id)) return null;
+        if (chainPlans[joint.id]) return <SegmentedChainConnector key={joint.id} joint={joint} plan={chainPlans[joint.id]!} refs={refs} />;
         if (joint.kind === "fixed") return <FixedConnector key={joint.id} joint={joint} refs={refs} design={design} />;
         if (joint.kind === "rope") return <RopeConnector key={joint.id} joint={joint} refs={refs} design={design} />;
         return <SpringConnector key={joint.id} joint={joint} refs={refs} design={design} />;
@@ -768,6 +995,71 @@ function PhysicsConnectors({ design, refs }: { design: DesignV1; refs: BodyRefs 
       ))}
     </>
   );
+}
+
+/**
+ * Breakable connectors. Rapier does not expose per-joint constraint forces,
+ * so the transmitted load is estimated from what the joint demonstrably does:
+ * both sides of a rigid connection undergo the same non-gravitational
+ * acceleration, and the joint must supply the lighter side's share of that
+ * force. The estimate is low-pass filtered (same constant as egg damage) so
+ * single-step solver noise cannot snap anything, and compared against the
+ * connector material's breakForceN from the catalog.
+ */
+function JointBreakMonitor({
+  design,
+  refs,
+  chainPlans,
+  brokenJointIds,
+  gravityMps2,
+  onBreak,
+}: {
+  design: DesignV1;
+  refs: BodyRefs;
+  chainPlans: ChainPlans;
+  brokenJointIds: ReadonlySet<string>;
+  gravityMps2: number;
+  onBreak: (jointId: string) => void;
+}) {
+  const elapsed = useRef(0);
+  const previousVelocities = useRef<Record<string, Vector3>>({});
+  const filteredLoadN = useRef<Record<string, number>>({});
+  useBeforePhysicsStep(() => {
+    elapsed.current += DROP_FIXED_STEP_SECONDS;
+    const accelerations: Record<string, number> = {};
+    for (const [bodyId, ref] of Object.entries(refs)) {
+      const body = ref.current;
+      if (!body) continue;
+      const velocity = body.linvel();
+      const previous = previousVelocities.current[bodyId];
+      if (previous) {
+        accelerations[bodyId] = Math.hypot(
+          velocity.x - previous.x,
+          velocity.y - previous.y - (-gravityMps2 * DROP_FIXED_STEP_SECONDS),
+          velocity.z - previous.z,
+        ) / DROP_FIXED_STEP_SECONDS;
+        previous.set(velocity.x, velocity.y, velocity.z);
+      } else {
+        previousVelocities.current[bodyId] = new Vector3(velocity.x, velocity.y, velocity.z);
+      }
+    }
+    if (elapsed.current < DROP_DAMAGE_ARM_SECONDS) return;
+    const retain = Math.pow(.35, STEP_RATE_SCALE);
+    for (const joint of design.joints) {
+      if (brokenJointIds.has(joint.id) || chainPlans[joint.id]) continue;
+      const bodyA = refs[joint.bodyA]?.current;
+      const bodyB = refs[joint.bodyB]?.current;
+      if (!bodyA || !bodyB) continue;
+      const loadA = (typeof bodyA.mass === "function" ? bodyA.mass() : 0) * (accelerations[joint.bodyA] ?? 0);
+      const loadB = (typeof bodyB.mass === "function" ? bodyB.mass() : 0) * (accelerations[joint.bodyB] ?? 0);
+      const load = Math.min(loadA, loadB);
+      const filtered = (filteredLoadN.current[joint.id] ?? 0) * retain + load * (1 - retain);
+      filteredLoadN.current[joint.id] = filtered;
+      const breakForceN = MATERIAL_BY_ID[joint.materialId]?.physics.breakForceN ?? Number.POSITIVE_INFINITY;
+      if (filtered > breakForceN) onBreak(joint.id);
+    }
+  });
+  return null;
 }
 
 const createPoseFrame = (
@@ -782,7 +1074,7 @@ const createPoseFrame = (
   };
 };
 
-const createDropPoseFrames = (design: DesignV1, offset: number): DropPoseFrames => Object.fromEntries([
+const createDropPoseFrames = (design: DesignV1, offset: number, chainPlans: ChainPlans): DropPoseFrames => Object.fromEntries([
   [
     "egg",
     createPoseFrame(
@@ -797,6 +1089,10 @@ const createDropPoseFrames = (design: DesignV1, offset: number): DropPoseFrames 
       part.transform.rotation,
     ),
   ]),
+  ...Object.entries(chainPlans).flatMap(([jointId, plan]) => plan.map((segment, index) => [
+    chainSegmentId(jointId, index),
+    createPoseFrame(segment.position, segment.rotation),
+  ])),
 ]);
 
 const PRESENTATION_PRIORITY = -50;
@@ -849,17 +1145,37 @@ function InterpolatedDropVisuals({
   poses,
   cracked,
   bagLoads,
+  chainPlans,
 }: {
   design: DesignV1;
   poses: DropPoseFrames;
   cracked: boolean;
   bagLoads: Record<string, BagLoadEntry[]>;
+  chainPlans: ChainPlans;
 }) {
+  const jointById = useMemo(() => new Map(design.joints.map((joint) => [joint.id, joint])), [design]);
   return (
     <>
       <InterpolatedBodyVisual pose={poses.egg!}>
         <EggVisual transform={design.eggTransform} cracked={cracked} />
       </InterpolatedBodyVisual>
+      {Object.entries(chainPlans).flatMap(([jointId, plan]) => {
+        const materialId = jointById.get(jointId)?.materialId;
+        const color = materialId === "tape" ? "#f2c94c" : materialId === "string" ? "#70513a" : "#df5d4e";
+        return plan.map((segment, index) => {
+          const id = chainSegmentId(jointId, index);
+          const pose = poses[id];
+          if (!pose) return null;
+          return (
+            <InterpolatedBodyVisual key={id} pose={pose}>
+              <mesh castShadow>
+                <capsuleGeometry args={[ROPE_SEGMENT_RADIUS_M, Math.max(.01, segment.lengthM - ROPE_SEGMENT_RADIUS_M * 2), 3, 8]} />
+                <meshStandardMaterial color={color} roughness={.85} />
+              </mesh>
+            </InterpolatedBodyVisual>
+          );
+        });
+      })}
       {design.parts.map((part) => (
         part.materialId === "plasticBag"
           // The bag gets a dedicated drop visual (unscaled group, geometry in
@@ -886,10 +1202,13 @@ function InterpolatedDropVisuals({
   );
 }
 
-function DropJointLines({ design, poses }: { design: DesignV1; poses: DropPoseFrames }) {
+function DropJointLines({ design, poses, chainPlans, brokenJointIds }: { design: DesignV1; poses: DropPoseFrames; chainPlans: ChainPlans; brokenJointIds: ReadonlySet<string> }) {
   const geometries = useRef<Record<string, BufferGeometry<any> | null>>({});
+  // Chained joints render their own segment capsules, and broken joints no
+  // longer connect anything.
+  const drawn = design.joints.filter((joint) => !chainPlans[joint.id] && !brokenJointIds.has(joint.id));
   useFrame(() => {
-    for (const joint of design.joints) {
+    for (const joint of drawn) {
       const geometry = geometries.current[joint.id];
       const bodyA = poses[joint.bodyA]?.displayed;
       const bodyB = poses[joint.bodyB]?.displayed;
@@ -905,7 +1224,7 @@ function DropJointLines({ design, poses }: { design: DesignV1; poses: DropPoseFr
     }
   }, PRESENTATION_PRIORITY);
   return (
-    <>{design.joints.map((joint) => (
+    <>{drawn.map((joint) => (
       <line key={joint.id}>
         <bufferGeometry ref={(node) => { geometries.current[joint.id] = node; }} />
         <lineBasicMaterial color={joint.materialId === "tape" ? "#f2c94c" : joint.materialId === "string" ? "#70513a" : "#df5d4e"} linewidth={joint.materialId === "tape" ? 4 : 2} />
@@ -1043,10 +1362,50 @@ function PlaybackStepper({
   return null;
 }
 
-function DropWorld({ design, running, playbackRate, gravityMps2, onComplete }: Omit<DropSceneProps, "runId">) {
+/** Advances the shared wind field once per physics step. */
+function WindStepper({ wind }: { wind: WindField }) {
+  useBeforePhysicsStep(() => {
+    wind.step(DROP_FIXED_STEP_SECONDS);
+  });
+  return null;
+}
+
+/**
+ * Targeted solver settings, applied once after the bodies exist. Bodies that
+ * participate in joints (or are balloons, whose contacts span huge mass
+ * ratios) get extra solver iterations so their constraints converge, and
+ * every collider gets a soft-CCD prediction margin so fast bodies generate
+ * speculative contacts before tunnelling instead of after.
+ */
+function SolverTuning({ design, refs }: { design: DesignV1; refs: BodyRefs }) {
+  useEffect(() => {
+    const jointed = new Set(design.joints.flatMap((joint) => [joint.bodyA, joint.bodyB]));
+    const balloons = new Set(design.parts.filter((part) => part.materialId === "balloon").map((part) => part.id));
+    for (const [bodyId, ref] of Object.entries(refs)) {
+      const body = ref.current;
+      if (!body) continue;
+      const needsIterations = jointed.has(bodyId) || balloons.has(bodyId) || bodyId.includes("#chain");
+      if (needsIterations && typeof body.setAdditionalSolverIterations === "function") {
+        body.setAdditionalSolverIterations(4);
+      }
+      if (typeof body.setSoftCcdPrediction === "function") body.setSoftCcdPrediction(.25);
+    }
+  }, [design, refs]);
+  return null;
+}
+
+function DropWorld({ design, runId, running, playbackRate, gravityMps2, airDensityKgM3, onComplete }: DropSceneProps) {
   const offset = useMemo(() => dropOffset(design), [design]);
   const framingDistance = useMemo(() => calculateDropCameraDistance(design), [design]);
-  const refs = useMemo<BodyRefs>(() => Object.fromEntries(["egg", ...design.parts.map((part) => part.id)].map((id) => [id, createRef<RapierRigidBody>() as RefObject<RapierRigidBody>])), [design]);
+  // Seeded per run: a given drop replays identically, reruns see new weather.
+  const wind = useMemo(() => createWindField((0x9e3779b9 ^ runId) >>> 0), [runId]);
+  const chainPlans = useMemo(() => calculateChainPlans(design, offset), [design, offset]);
+  const [brokenJointIds, setBrokenJointIds] = useState<ReadonlySet<string>>(new Set<string>());
+  const refs = useMemo<BodyRefs>(() => Object.fromEntries([
+    "egg",
+    ...design.parts.map((part) => part.id),
+    ...Object.entries(chainPlans).flatMap(([jointId, plan]) => plan.map((_, index) => chainSegmentId(jointId, index))),
+  ].map((id) => [id, createRef<RapierRigidBody>() as RefObject<RapierRigidBody>])), [design, chainPlans]);
   // For each plastic bag, every body joined to it (directly or through other
   // parts) with its mass, so the canopy model can tell a slung-below payload
   // from one riding on top of the sheet.
@@ -1084,7 +1443,7 @@ function DropWorld({ design, running, playbackRate, gravityMps2, onComplete }: O
     }
     return loads;
   }, [design]);
-  const poses = useMemo(() => createDropPoseFrames(design, offset), [design, offset]);
+  const poses = useMemo(() => createDropPoseFrames(design, offset, chainPlans), [design, offset, chainPlans]);
   const [cracked, setCracked] = useState(false);
   const monitorHandlers = useRef<{
     collision?: (payload: CollisionEnterPayload) => void;
@@ -1123,6 +1482,7 @@ function DropWorld({ design, running, playbackRate, gravityMps2, onComplete }: O
         lengthUnit={0.1}
         paused
       >
+        <WindStepper wind={wind} />
         <PlaybackStepper running={running} playbackRate={playbackRate} refs={refs} poses={poses} />
         <RigidBody type="fixed" colliders={false} userData={{ bodyId: "ground", materialId: "ground", contactAreaM2: 0 }}>
           <CuboidCollider args={[6, .05, 6]} position={[0, -.05, 0]} friction={.88} restitution={.05} />
@@ -1146,13 +1506,15 @@ function DropWorld({ design, running, playbackRate, gravityMps2, onComplete }: O
             onCollisionEnter={(payload) => monitorHandlers.current.collision?.(payload)}
             onContactForce={(payload) => monitorHandlers.current.contact?.(payload)}
           />
-          <EggAerodynamicForces bodyRef={refs.egg!} dimensions={design.eggTransform.dimensions} />
+          <EggAerodynamicForces bodyRef={refs.egg!} dimensions={design.eggTransform.dimensions} airDensityKgM3={airDensityKgM3} wind={wind} />
         </RigidBody>
-        {design.parts.map((part) => <PhysicsPart key={part.id} part={part} offset={offset} bodyRef={refs[part.id]!} gravityMps2={gravityMps2} load={bagLoads[part.id] ? { entries: bagLoads[part.id]!, refs } : undefined} />)}
-        <PhysicsConnectors design={design} refs={refs} />
+        {design.parts.map((part) => <PhysicsPart key={part.id} part={part} offset={offset} bodyRef={refs[part.id]!} gravityMps2={gravityMps2} airDensityKgM3={airDensityKgM3} wind={wind} load={bagLoads[part.id] ? { entries: bagLoads[part.id]!, refs } : undefined} />)}
+        <PhysicsConnectors design={design} refs={refs} chainPlans={chainPlans} brokenJointIds={brokenJointIds} />
+        <JointBreakMonitor design={design} refs={refs} chainPlans={chainPlans} brokenJointIds={brokenJointIds} gravityMps2={gravityMps2} onBreak={(jointId) => setBrokenJointIds((previous) => previous.has(jointId) ? previous : new Set(previous).add(jointId))} />
         <BalloonSuspension design={design} refs={refs} />
-        <InterpolatedDropVisuals design={design} poses={poses} cracked={cracked} bagLoads={bagLoads} />
-        <DropJointLines design={design} poses={poses} />
+        <SolverTuning design={design} refs={refs} />
+        <InterpolatedDropVisuals design={design} poses={poses} cracked={cracked} bagLoads={bagLoads} chainPlans={chainPlans} />
+        <DropJointLines design={design} poses={poses} chainPlans={chainPlans} brokenJointIds={brokenJointIds} />
         <MonitorBridge design={design} refs={refs} eggRef={refs.egg!} running={running} playbackRate={playbackRate} gravityMps2={gravityMps2} onComplete={onComplete} setCracked={setCracked} handlers={monitorHandlers} />
       </Physics>
       <ContactShadows position={[0, .01, 0]} opacity={.38} scale={5} blur={2.4} far={4} resolution={256} />
@@ -1197,7 +1559,23 @@ function MonitorBridge({ handlers, design, refs, eggRef, running, playbackRate, 
   const filteredAccelerationG = useRef(0);
   const recentRelativeSpeeds = useRef<Record<string, number>>({});
   const crackPending = useRef(false);
+  const runawayStrikes = useRef(0);
+  const watchdogTripped = useRef(false);
   const maxWallSeconds = calculateDropMaxWallSeconds(playbackRate);
+  // The drop height refers to the contraption's lowest point, so the topmost
+  // body of a tall build starts higher and can legitimately fall faster; the
+  // plausibility bound must cover it too.
+  const maxPlausibleSpeed = useMemo(() => {
+    let lowest = design.eggTransform.position[1] - Math.max(...design.eggTransform.dimensions) / 2;
+    let highest = design.eggTransform.position[1] + Math.max(...design.eggTransform.dimensions) / 2;
+    for (const part of design.parts) {
+      const half = Math.max(...part.transform.dimensions) / 2;
+      lowest = Math.min(lowest, part.transform.position[1] - half);
+      highest = Math.max(highest, part.transform.position[1] + half);
+    }
+    const spanFt = Math.max(0, highest - lowest) / feetToMeters(1);
+    return maxPlausibleSpeedMps(design.heightFt + spanFt, gravityMps2);
+  }, [design, gravityMps2]);
   const bodyHalfExtents = useMemo(() => Object.fromEntries([
     ["egg", Math.max(...design.eggTransform.dimensions) / 2],
     ...design.parts.map((part) => [part.id, Math.max(...part.transform.dimensions) / 2]),
@@ -1260,6 +1638,51 @@ function MonitorBridge({ handlers, design, refs, eggRef, running, playbackRate, 
     const base = { outcome, heightFt: design.heightFt, impactSpeedMps, peakG: peakG.current, peakForceN: peakForce.current, damage: Math.min(1, damage.current) };
     onComplete({ ...base, score: calculateMissionScore(design, base) });
   };
+
+  // Watchdog, applied after every step so the bound is absolute: no body can
+  // plausibly exceed vacuum free-fall from the drop height (plus headroom).
+  // Anything faster is solver divergence, not physics — clamp the first
+  // offences so a transient cannot snowball, and end the run honestly if the
+  // simulation keeps diverging.
+  useAfterPhysicsStep(() => {
+    if (watchdogTripped.current) return;
+    for (const ref of Object.values(refs)) {
+      const body = ref.current;
+      if (!body) continue;
+      const position = body.translation();
+      const bodyVelocity = body.linvel();
+      const health = classifyBodyMotion(
+        [position.x, position.y, position.z],
+        [bodyVelocity.x, bodyVelocity.y, bodyVelocity.z],
+        maxPlausibleSpeed,
+      );
+      if (health === "ok") continue;
+      if (health === "invalid") {
+        watchdogTripped.current = true;
+        break;
+      }
+      runawayStrikes.current += 1;
+      const speed = Math.hypot(bodyVelocity.x, bodyVelocity.y, bodyVelocity.z);
+      if (speed > maxPlausibleSpeed && typeof body.setLinvel === "function") {
+        const scale = maxPlausibleSpeed / speed;
+        body.setLinvel({ x: bodyVelocity.x * scale, y: bodyVelocity.y * scale, z: bodyVelocity.z * scale }, true);
+      }
+      const angular = body.angvel?.();
+      if (angular && typeof body.setAngvel === "function") {
+        const spinSpeed = Math.hypot(angular.x, angular.y, angular.z);
+        if (spinSpeed > 50) {
+          const scale = 50 / spinSpeed;
+          body.setAngvel({ x: angular.x * scale, y: angular.y * scale, z: angular.z * scale }, true);
+        }
+      }
+      // Two full simulated seconds of continuous clamping means the run is
+      // genuinely unstable, not just recovering from a bad impulse.
+      if (runawayStrikes.current > 2 / DROP_FIXED_STEP_SECONDS) watchdogTripped.current = true;
+    }
+    if (watchdogTripped.current && !completed.current) {
+      finish(damage.current >= 1 ? "cracked" : "survived");
+    }
+  });
 
   useBeforePhysicsStep(() => {
     physicsElapsed.current += DROP_FIXED_STEP_SECONDS;
@@ -1375,7 +1798,12 @@ function MonitorBridge({ handlers, design, refs, eggRef, running, playbackRate, 
     const eggSettled = Boolean(eggBody) && (eggBody!.isSleeping() || (() => {
       const velocity = eggBody!.linvel();
       const angular = eggBody!.angvel();
-      return Math.hypot(velocity.x, velocity.y, velocity.z) < .16 && Math.hypot(angular.x, angular.y, angular.z) < .35;
+      // The angular threshold is loose on purpose: an egg resting on a live
+      // cushion (balloons, wind) rocks in place at up to ~1 rad/s, which on a
+      // 2.4 cm shell is invisible; actual travel is pinned by the linear
+      // threshold. A strict angular gate kept resetting the settle timer and
+      // pushed cushioned wins out to the 20 s simulation timeout.
+      return Math.hypot(velocity.x, velocity.y, velocity.z) < .16 && Math.hypot(angular.x, angular.y, angular.z) < 1.5;
     })());
 
     if (pendingOutcome.current) {
@@ -1455,7 +1883,7 @@ function DropTower({ heightM, maxHeightFt }: { heightM: number; maxHeightFt: num
   );
 }
 
-export function DropScene({ design, runId, running, playbackRate, gravityMps2, onComplete }: DropSceneProps) {
+export function DropScene({ design, runId, running, playbackRate, gravityMps2, airDensityKgM3, onComplete }: DropSceneProps) {
   const normalizedPlaybackRate = normalizeDropPlaybackRate(playbackRate);
   return (
     <Canvas
@@ -1465,7 +1893,7 @@ export function DropScene({ design, runId, running, playbackRate, gravityMps2, o
       gl={{ antialias: true, stencil: false, powerPreference: "high-performance" }}
       fallback={<div className="webgl-fallback" role="alert"><span>🥚</span><strong>3D graphics are unavailable</strong><p>Enable WebGL or try a current browser to run this drop.</p></div>}
     >
-      <Suspense fallback={null}><DropWorld design={design} running={running} playbackRate={normalizedPlaybackRate} gravityMps2={gravityMps2} onComplete={onComplete} /></Suspense>
+      <Suspense fallback={null}><DropWorld design={design} runId={runId} running={running} playbackRate={normalizedPlaybackRate} gravityMps2={gravityMps2} airDensityKgM3={airDensityKgM3} onComplete={onComplete} /></Suspense>
     </Canvas>
   );
 }

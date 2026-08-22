@@ -27,6 +27,7 @@ type VisualObjectState = {
 const playbackHarness = vi.hoisted(() => ({
   frameCallbacks: new Map<FrameCallback, number>(),
   beforeStepCallbacks: new Set<BeforeStepCallback>(),
+  afterStepCallbacks: new Set<BeforeStepCallback>(),
   stepDeltas: [] as number[],
   stepEffect: undefined as undefined | ((delta: number) => void),
   visualObjects: new WeakMap<object, VisualObjectState>(),
@@ -174,15 +175,26 @@ vi.mock("@react-three/rapier", async () => {
         return () => { playbackHarness.beforeStepCallbacks.delete(run); };
       }, []);
     },
+    useAfterPhysicsStep: (callback: BeforeStepCallback) => {
+      const callbackRef = React.useRef(callback);
+      callbackRef.current = callback;
+      React.useLayoutEffect(() => {
+        const run = () => callbackRef.current();
+        playbackHarness.afterStepCallbacks.add(run);
+        return () => { playbackHarness.afterStepCallbacks.delete(run); };
+      }, []);
+    },
     useFixedJoint: () => undefined,
     useRapier: () => ({
       step: (delta: number) => {
         playbackHarness.stepDeltas.push(delta);
         for (const callback of [...playbackHarness.beforeStepCallbacks]) callback();
         playbackHarness.stepEffect?.(delta);
+        for (const callback of [...playbackHarness.afterStepCallbacks]) callback();
       },
     }),
     useRopeJoint: () => undefined,
+    useSphericalJoint: () => undefined,
     useSpringJoint: () => undefined,
   };
 });
@@ -259,6 +271,7 @@ describe("DropScene playback presentation", () => {
     });
     playbackHarness.frameCallbacks.clear();
     playbackHarness.beforeStepCallbacks.clear();
+    playbackHarness.afterStepCallbacks.clear();
     playbackHarness.stepDeltas.length = 0;
     playbackHarness.stepEffect = undefined;
     playbackHarness.collision = undefined;
@@ -271,7 +284,7 @@ describe("DropScene playback presentation", () => {
   });
 
   it("keeps the camera and drop scene rendered while physics is held for 500 ms", () => {
-    render(<DropScene design={freshDesign()} runId={1} running playbackRate={0.2} gravityMps2={STANDARD_GRAVITY_MPS2} onComplete={vi.fn()} />);
+    render(<DropScene design={freshDesign()} runId={1} running playbackRate={0.2} gravityMps2={STANDARD_GRAVITY_MPS2} airDensityKgM3={1.225} onComplete={vi.fn()} />);
 
     expect(screen.getByTestId("drop-canvas")).toBeInTheDocument();
     expect(screen.getByTestId("drop-camera")).toBeInTheDocument();
@@ -289,7 +302,7 @@ describe("DropScene playback presentation", () => {
   });
 
   it("uses the selected playback rate while keeping every Rapier step fixed at 1/240 second", () => {
-    render(<DropScene design={freshDesign()} runId={1} running playbackRate={2} gravityMps2={STANDARD_GRAVITY_MPS2} onComplete={vi.fn()} />);
+    render(<DropScene design={freshDesign()} runId={1} running playbackRate={2} gravityMps2={STANDARD_GRAVITY_MPS2} airDensityKgM3={1.225} onComplete={vi.fn()} />);
 
     advanceFrame(0.5);
     expect(playbackHarness.stepDeltas).toEqual([]);
@@ -299,7 +312,7 @@ describe("DropScene playback presentation", () => {
   });
 
   it("enables pinch zoom during a drop while keeping camera rotation and panning locked", () => {
-    render(<DropScene design={freshDesign()} runId={1} running playbackRate={0.2} gravityMps2={STANDARD_GRAVITY_MPS2} onComplete={vi.fn()} />);
+    render(<DropScene design={freshDesign()} runId={1} running playbackRate={0.2} gravityMps2={STANDARD_GRAVITY_MPS2} airDensityKgM3={1.225} onComplete={vi.fn()} />);
 
     expect(screen.getByTestId("drop-zoom-controls")).toHaveAttribute("data-enable-zoom", "true");
     expect(screen.getByTestId("drop-zoom-controls")).toHaveAttribute("data-enable-rotate", "false");
@@ -324,7 +337,7 @@ describe("DropScene playback presentation", () => {
   });
 
   it("preserves the user's pinch-zoom distance while the camera follows the falling egg", () => {
-    render(<DropScene design={freshDesign()} runId={1} running playbackRate={0.2} gravityMps2={STANDARD_GRAVITY_MPS2} onComplete={vi.fn()} />);
+    render(<DropScene design={freshDesign()} runId={1} running playbackRate={0.2} gravityMps2={STANDARD_GRAVITY_MPS2} airDensityKgM3={1.225} onComplete={vi.fn()} />);
 
     // Establish the camera target during the motionless release hold, then
     // emulate OrbitControls moving the camera farther from that target.
@@ -352,7 +365,7 @@ describe("DropScene playback presentation", () => {
   });
 
   it("feeds the egg visual and camera a smooth 60 Hz pose between physics samples", () => {
-    render(<DropScene design={freshDesign()} runId={1} running playbackRate={0.2} gravityMps2={STANDARD_GRAVITY_MPS2} onComplete={vi.fn()} />);
+    render(<DropScene design={freshDesign()} runId={1} running playbackRate={0.2} gravityMps2={STANDARD_GRAVITY_MPS2} airDensityKgM3={1.225} onComplete={vi.fn()} />);
     const eggVisualGroup = screen.getByTestId("egg-visual").parentElement!;
     advanceFrame(.5);
     // Keep the fake Rapier body aligned with the design's height before
@@ -388,7 +401,7 @@ describe("DropScene playback presentation", () => {
 
   it("reveals the visible cracked state before publishing the result", () => {
     const onComplete = vi.fn();
-    render(<DropScene design={freshDesign()} runId={1} running playbackRate={0.2} gravityMps2={STANDARD_GRAVITY_MPS2} onComplete={onComplete} />);
+    render(<DropScene design={freshDesign()} runId={1} running playbackRate={0.2} gravityMps2={STANDARD_GRAVITY_MPS2} airDensityKgM3={1.225} onComplete={onComplete} />);
 
     advanceFrame(0.5);
     advanceFrame(0.1);
@@ -459,7 +472,7 @@ describe("DropScene playback presentation", () => {
     ];
     const onComplete = vi.fn();
 
-    render(<DropScene design={design} runId={1} running playbackRate={0.2} gravityMps2={STANDARD_GRAVITY_MPS2} onComplete={onComplete} />);
+    render(<DropScene design={design} runId={1} running playbackRate={0.2} gravityMps2={STANDARD_GRAVITY_MPS2} airDensityKgM3={1.225} onComplete={onComplete} />);
 
     // The assembled contraption gets the same motionless release hold as a
     // bare egg; connector setup must not skip straight to the result screen.
@@ -531,7 +544,7 @@ describe("DropScene playback presentation", () => {
     playbackHarness.bodyOverrides["straw-loose"] = looseStrawBody;
     const onComplete = vi.fn();
 
-    render(<DropScene design={design} runId={1} running playbackRate={0.2} gravityMps2={STANDARD_GRAVITY_MPS2} onComplete={onComplete} />);
+    render(<DropScene design={design} runId={1} running playbackRate={0.2} gravityMps2={STANDARD_GRAVITY_MPS2} airDensityKgM3={1.225} onComplete={onComplete} />);
     advanceFrame(0.499);
     advanceFrame(0.001);
 

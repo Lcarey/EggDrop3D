@@ -80,7 +80,9 @@ test("a 5 ft bare egg produces a result and can return to editing", async ({ pag
 });
 
 test("an egg taped to balloons remains visible through its fall before results", async ({ page }) => {
-  await page.evaluate((design) => {
+  // addInitScript runs before the app boots on the next navigation, so the
+  // draft cannot be clobbered by the app's own 500 ms draft autosave.
+  await page.addInitScript((design) => {
     localStorage.setItem("eggdrop3d:active-draft:v1", JSON.stringify(design));
   }, {
     schemaVersion: 1,

@@ -1,11 +1,12 @@
 import { expect, test } from "@playwright/test";
 
 // Regression for the balloon-lift solver explosion: a glued cluster of 15
-// default-size balloons lifts an egg hanging on a long diagonal tape tether
-// under Jupiter gravity. The egg's reported speed used to run away
-// geometrically (observed at ~5.5e12 m/s) once the rigid tether network
-// started oscillating; any speed beyond vacuum free-fall from the drop
-// height (~7 m/s here) plus generous headroom means the solver diverged.
+// default-size balloons lifts an egg hanging on a long diagonal tape tether.
+// The egg's reported speed used to run away geometrically (observed at
+// ~5.5e12 m/s) once the rigid tether network started oscillating; any speed
+// beyond vacuum free-fall from the drop height (~7 m/s here) plus generous
+// headroom means the solver diverged. Runs on Earth: with per-planet
+// atmospheres, Earth is where party balloons actually generate lift.
 const offsets: [number, number, number][] = [
   // Two-layer blob; centres ~0.2 m apart so soft shells interpenetrate like a
   // hand-packed cluster (cores are 0.095 m, so several pairs nearly touch).
@@ -68,7 +69,7 @@ test("a rising balloon lift with a long tape tether keeps physically plausible s
 
   await page.getByRole("button", { name: /set up drop/i }).click();
   const setup = page.getByRole("dialog", { name: /how high/i });
-  await setup.getByRole("slider", { name: "Gravity strength" }).fill("7");
+  await setup.getByRole("slider", { name: "Gravity strength" }).fill("3");
   // 0.1x playback matches the recording where the runaway was observed.
   await setup.getByRole("slider", { name: "Drop playback speed" }).fill("0.1");
   await setup.getByRole("button", { name: /release contraption/i }).click();
@@ -84,7 +85,7 @@ test("a rising balloon lift with a long tape tether keeps physically plausible s
     if (done > 0) break;
     await page.waitForTimeout(200);
   }
-  // Vacuum free-fall from 8 ft on Jupiter is ~11 m/s; a rising balloon lift
+  // Vacuum free-fall from 8 ft on Earth is ~7 m/s; a rising balloon lift
   // moves at a couple of m/s. 25 m/s only trips on solver divergence.
   expect(maxTopSpeed).toBeLessThan(25);
 });

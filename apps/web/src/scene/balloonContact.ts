@@ -14,6 +14,17 @@
 export const BALLOON_GAUGE_PRESSURE_PA = 800;
 /** Fraction of critical damping: latex hysteresis and air squeezed aside. */
 export const BALLOON_CONTACT_DAMPING_RATIO = 0.5;
+/**
+ * Cap on the acceleration a contact reaction may give the balloon, m/s^2.
+ * A rigid body is the wrong model for the reaction side: pressing on a real
+ * balloon first deflects the membrane locally while the far side lags, so the
+ * balloon as a whole is accelerated far more gently than F/m of its few grams
+ * suggests. Without this cap a payload resting on a balloon in flight bats it
+ * away at hundreds of m/s^2 in a single step and the cushion disintegrates.
+ * The value is sized so a balloon can still match a payload closing at a few
+ * m/s within its shell stroke (v^2 / (2 * stroke) ~ 60 m/s^2).
+ */
+export const BALLOON_MAX_REACTION_MPS2 = 100;
 
 export type PneumaticContactInput = {
   /** How deep the other body intrudes into the shell, metres (>= 0). */

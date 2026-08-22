@@ -4,7 +4,7 @@ import {
   Rotate3D, RotateCcw, Save, Scale3D, Share2, Sparkles, Trash2, Trophy, Undo2, X,
 } from "lucide-react";
 import {
-  DesignV1Schema, GRAVITY_BODY_IDS, GRAVITY_BODIES, MATERIAL_BY_ID, MISSION_BY_ID, MISSION_CATALOG, calculatePartMassKg,
+  DesignV1Schema, GRAVITY_BODY_IDS, GRAVITY_BODIES, MATERIAL_BY_ID, MISSION_BY_ID, MISSION_CATALOG, airDensityKgM3ForBody, calculatePartMassKg,
   countDesignMaterials, gravityMps2ForBody, snapScalar, MAX_DROP_HEIGHT_FT, MIN_DROP_HEIGHT_FT,
   type DesignPartV1, type DesignV1, type PublicDesign, type Transform,
 } from "@eggdrop/shared";
@@ -432,6 +432,7 @@ export function App() {
   const gravityBodyId = useEditorStore((state) => state.gravityBodyId);
   const gravityLabel = GRAVITY_BODIES[gravityBodyId].label;
   const gravityMps2 = gravityMps2ForBody(gravityBodyId);
+  const airDensityKgM3 = airDensityKgM3ForBody(gravityBodyId);
   const result = useEditorStore((state) => state.result);
   const cloud = useEditorStore((state) => state.cloud);
   const past = useEditorStore((state) => state.past);
@@ -673,7 +674,7 @@ export function App() {
           <LiveEggSpeedChip />
         </div>
         {stage === "dropping" || stage === "result" ? (
-          <DropScene design={design} runId={runId} running={stage === "dropping"} playbackRate={playbackRate} gravityMps2={gravityMps2} onComplete={finishRun} />
+          <DropScene design={design} runId={runId} running={stage === "dropping"} playbackRate={playbackRate} gravityMps2={gravityMps2} airDensityKgM3={airDensityKgM3} onComplete={finishRun} />
         ) : <BuildScene editable={!editingLocked && stage === "build"} fitNonce={fitNonce} />}
         {stage === "build" && design.parts.length === 0 && !snapDraft && <div className="stage-hint"><strong>Start with the egg</strong><span>Choose a material, then click the grid to place it.</span></div>}
         {stage === "build" && snapDraft && (
