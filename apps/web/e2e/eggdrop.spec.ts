@@ -32,7 +32,7 @@ test("inventory and continuous height controls are complete", async ({ page }) =
   await slider.fill("100");
   await expect(dialog.locator(".height-readout strong")).toHaveText("100.0");
 
-  const gravitySlider = dialog.getByRole("slider", { name: "Gravity strength" });
+  const gravitySlider = dialog.getByRole("slider", { name: "Planet" });
   await expect(gravitySlider).toHaveAttribute("min", "0");
   await expect(gravitySlider).toHaveAttribute("max", "7");
   await expect(gravitySlider).toHaveAttribute("step", "1");

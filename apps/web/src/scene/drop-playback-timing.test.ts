@@ -2,9 +2,12 @@ import { describe, expect, it } from "vitest";
 import { Quaternion, Vector3 } from "three";
 import { freshDesign } from "../editor/store";
 import {
+  atmosphericDamping,
   calculateAssemblyContactPairs,
+  calculateBracingJoints,
   calculateDropCameraDistance,
   calculateFixedJointFrames,
+  calculateWeldedAssemblyRoots,
   DROP_OUTCOME_REVEAL_SECONDS,
   DROP_FIXED_STEP_SECONDS,
   DROP_MAX_WALL_SECONDS,
@@ -290,5 +293,168 @@ describe("fixed tape setup", () => {
     design.parts = [];
     design.joints = [];
     expect(calculateAssemblyContactPairs(design)).toEqual([]);
+  });
+});
+
+describe("welded assembly roots (balloon shell-force suppression)", () => {
+  const balloonAt = (id: string, x: number, y = 0.15) => ({
+    id,
+    materialId: "balloon" as const,
+    transform: {
+      position: [x, y, 0] as [number, number, number],
+      rotation: [0, 0, 0, 1] as [number, number, number, number],
+      dimensions: [0.3, 0.38, 0.3] as [number, number, number],
+    },
+  });
+  const tapeJoint = (id: string, bodyA: string, bodyB: string) => ({
+    id,
+    kind: "fixed" as const,
+    materialId: "tape" as const,
+    bodyA,
+    bodyB,
+    anchorA: [0, 0, 0] as [number, number, number],
+    anchorB: [0, 0, 0] as [number, number, number],
+  });
+
+  it("merges balloons welded to the egg into one assembly, transitively", () => {
+    const design = freshDesign();
+    design.parts = [balloonAt("b1", -0.18), balloonAt("b2", 0.18), balloonAt("free", 2)];
+    design.joints = [tapeJoint("t1", "egg", "b1"), tapeJoint("t2", "egg", "b2")];
+    const roots = calculateWeldedAssemblyRoots(design);
+    expect(roots.get("b1")).toBe(roots.get("egg"));
+    expect(roots.get("b2")).toBe(roots.get("egg"));
+    expect(roots.get("b1")).toBe(roots.get("b2"));
+    expect(roots.get("free")).not.toBe(roots.get("egg"));
+  });
+
+  it("does not weld rope-tied bodies", () => {
+    const design = freshDesign();
+    design.parts = [balloonAt("b1", 0.18)];
+    design.joints = [{
+      id: "s1",
+      kind: "rope" as const,
+      materialId: "string" as const,
+      bodyA: "egg",
+      bodyB: "b1",
+      anchorA: [0, 0.032, 0] as [number, number, number],
+      anchorB: [-0.15, 0, 0] as [number, number, number],
+    }];
+    const roots = calculateWeldedAssemblyRoots(design);
+    expect(roots.get("b1")).not.toBe(roots.get("egg"));
+  });
+
+  it("does not weld across a long chained tape tether", () => {
+    const design = freshDesign();
+    // Balloon 1.5 m above the egg: the fixed joint spans far more than the
+    // chaining threshold with a wide body gap, so it is simulated as a
+    // flexible chain, not a weld.
+    design.parts = [balloonAt("b1", 0, 1.9)];
+    design.joints = [{
+      ...tapeJoint("t1", "egg", "b1"),
+      anchorA: [0, 0.032, 0] as [number, number, number],
+      anchorB: [0, -0.19, 0] as [number, number, number],
+    }];
+    const roots = calculateWeldedAssemblyRoots(design);
+    expect(roots.get("b1")).not.toBe(roots.get("egg"));
+  });
+});
+
+describe("bracing joints for star-shaped weld hubs", () => {
+  const balloonAt = (id: string, x: number, z = 0) => ({
+    id,
+    materialId: "balloon" as const,
+    transform: {
+      position: [x, 0.68, z] as [number, number, number],
+      rotation: [0, 0, 0, 1] as [number, number, number, number],
+      dimensions: [0.3, 0.38, 0.3] as [number, number, number],
+    },
+  });
+  const tapeJoint = (id: string, bodyA: string, bodyB: string) => ({
+    id,
+    kind: "fixed" as const,
+    materialId: "tape" as const,
+    bodyA,
+    bodyB,
+    anchorA: [0, 0.03, 0] as [number, number, number],
+    anchorB: [0, -0.19, 0] as [number, number, number],
+  });
+
+  it("braces the spokes of a 3-weld egg hub into a ring that bypasses the egg", () => {
+    const design = freshDesign();
+    design.parts = [balloonAt("b1", -0.18), balloonAt("b2", 0.18), balloonAt("b3", 0, -0.18)];
+    design.joints = [tapeJoint("t1", "egg", "b1"), tapeJoint("t2", "egg", "b2"), tapeJoint("t3", "egg", "b3")];
+    const braces = calculateBracingJoints(design);
+    expect(braces).toHaveLength(3);
+    expect(braces.every((joint) => joint.kind === "fixed")).toBe(true);
+    expect(braces.flatMap((joint) => [joint.bodyA, joint.bodyB])).not.toContain("egg");
+    // Each brace welds at the world midpoint of its pair, preserving the pose.
+    for (const brace of braces) {
+      const a = design.parts.find((part) => part.id === brace.bodyA)!;
+      const b = design.parts.find((part) => part.id === brace.bodyB)!;
+      const worldA = worldPoint(a.transform.position, a.transform.rotation, brace.anchorA);
+      const worldB = worldPoint(b.transform.position, b.transform.rotation, brace.anchorB);
+      expect(worldA.distanceTo(worldB)).toBeLessThan(1e-10);
+    }
+  });
+
+  it("does not duplicate an existing weld between two spokes", () => {
+    const design = freshDesign();
+    design.parts = [balloonAt("b1", -0.18), balloonAt("b2", 0.18)];
+    design.joints = [
+      tapeJoint("t1", "egg", "b1"),
+      tapeJoint("t2", "egg", "b2"),
+      tapeJoint("t3", "b1", "b2"),
+    ];
+    expect(calculateBracingJoints(design)).toHaveLength(0);
+  });
+
+  it("drops braces whose hub joints have broken", () => {
+    const design = freshDesign();
+    design.parts = [balloonAt("b1", -0.18), balloonAt("b2", 0.18), balloonAt("b3", 0, -0.18)];
+    design.joints = [tapeJoint("t1", "egg", "b1"), tapeJoint("t2", "egg", "b2"), tapeJoint("t3", "egg", "b3")];
+    // With t3 broken the hub has two spokes left: a single brace remains.
+    expect(calculateBracingJoints(design, new Set(["t3"]))).toHaveLength(1);
+    expect(calculateBracingJoints(design, new Set(["t2", "t3"]))).toHaveLength(0);
+  });
+
+  it("ignores single welds and rope joints", () => {
+    const design = freshDesign();
+    design.parts = [balloonAt("b1", -0.18), balloonAt("b2", 0.18)];
+    design.joints = [
+      tapeJoint("t1", "egg", "b1"),
+      {
+        id: "s1",
+        kind: "rope" as const,
+        materialId: "string" as const,
+        bodyA: "egg",
+        bodyB: "b2",
+        anchorA: [0, 0.032, 0] as [number, number, number],
+        anchorB: [-0.15, 0, 0] as [number, number, number],
+      },
+    ];
+    expect(calculateBracingJoints(design)).toHaveLength(0);
+  });
+});
+
+describe("atmospheric damping (no phantom drag in vacuum)", () => {
+  it("keeps the full material damping at Earth sea level", () => {
+    expect(atmosphericDamping(0.45, 1.225)).toBeCloseTo(0.45, 12);
+  });
+
+  it("reduces damping to the hygiene floor in vacuum", () => {
+    expect(atmosphericDamping(0.45, 0)).toBeCloseTo(0.01, 12);
+    expect(atmosphericDamping(0.04, 0)).toBeCloseTo(0.01, 12);
+  });
+
+  it("never raises damping above the material value, even in dense air", () => {
+    expect(atmosphericDamping(0.3, 65)).toBeCloseTo(0.3, 12);
+  });
+
+  it("never raises a tiny material damping up to the floor", () => {
+    expect(atmosphericDamping(0.005, 0)).toBeCloseTo(0.005, 12);
+  });
+
+  it("scales proportionally in thin atmospheres", () => {
+    expect(atmosphericDamping(0.4, 0.245)).toBeCloseTo(0.08, 12);
   });
 });

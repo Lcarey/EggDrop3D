@@ -75,14 +75,25 @@ const readRecord = <T,>(key: string, fallback: T): T => {
 
 export const getEditToken = (id: string) => readRecord<Record<string, string>>(TOKEN_KEY, {})[id] ?? null;
 
-export const rememberCloudDesign = (design: PublicDesign, editToken?: string) => {
+export type RememberedDesign = { id: string; name: string; updatedAt: string; thumbnail?: string };
+
+export const rememberCloudDesign = (design: PublicDesign, editToken?: string, thumbnail?: string | null) => {
   if (editToken) {
     const tokens = readRecord<Record<string, string>>(TOKEN_KEY, {});
     tokens[design.id] = editToken;
     localStorage.setItem(TOKEN_KEY, JSON.stringify(tokens));
   }
-  const items = readRecord<Array<{ id: string; name: string; updatedAt: string }>>(DESIGN_INDEX_KEY, []);
-  const next = [{ id: design.id, name: design.design.name, updatedAt: design.updatedAt }, ...items.filter((item) => item.id !== design.id)].slice(0, 20);
+  const items = readRecord<RememberedDesign[]>(DESIGN_INDEX_KEY, []);
+  // Keep the last captured thumbnail when this save has none (e.g. saving
+  // from a stage where the build canvas is not mounted).
+  const previousThumbnail = items.find((item) => item.id === design.id)?.thumbnail;
+  const entry: RememberedDesign = {
+    id: design.id,
+    name: design.design.name,
+    updatedAt: design.updatedAt,
+    ...(thumbnail ?? previousThumbnail ? { thumbnail: thumbnail ?? previousThumbnail } : {}),
+  };
+  const next = [entry, ...items.filter((item) => item.id !== design.id)].slice(0, 20);
   localStorage.setItem(DESIGN_INDEX_KEY, JSON.stringify(next));
 };
 
@@ -90,9 +101,9 @@ export const forgetCloudDesign = (id: string) => {
   const tokens = readRecord<Record<string, string>>(TOKEN_KEY, {});
   delete tokens[id];
   localStorage.setItem(TOKEN_KEY, JSON.stringify(tokens));
-  const items = readRecord<Array<{ id: string; name: string; updatedAt: string }>>(DESIGN_INDEX_KEY, []);
+  const items = readRecord<RememberedDesign[]>(DESIGN_INDEX_KEY, []);
   localStorage.setItem(DESIGN_INDEX_KEY, JSON.stringify(items.filter((item) => item.id !== id)));
 };
 
-export const listRememberedDesigns = () => readRecord<Array<{ id: string; name: string; updatedAt: string }>>(DESIGN_INDEX_KEY, []);
+export const listRememberedDesigns = () => readRecord<RememberedDesign[]>(DESIGN_INDEX_KEY, []);
 

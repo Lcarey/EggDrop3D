@@ -40,6 +40,8 @@ npm run build
 npm run synth
 ```
 
+AI agents validating physics or drop behavior should read [AGENTS.md](./AGENTS.md) before claiming a simulation is healthy.
+
 Keyboard controls in build mode include <kbd>Ctrl/Cmd-Z</kbd> for undo, <kbd>Ctrl/Cmd-Shift-Z</kbd> for redo, <kbd>Ctrl/Cmd-D</kbd> for duplicate, <kbd>Delete</kbd> for delete, <kbd>W</kbd>/<kbd>E</kbd>/<kbd>R</kbd> for translate/rotate/scale, and <kbd>Escape</kbd> to cancel the active material or connector.
 
 ## Saves and sharing

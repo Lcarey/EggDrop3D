@@ -331,7 +331,7 @@ describe("DropScene playback presentation", () => {
       expect(Number.isFinite(limits.minDistance)).toBe(true);
       expect(Number.isFinite(limits.maxDistance)).toBe(true);
       expect(limits.minDistance).toBeGreaterThanOrEqual(.25);
-      expect(limits.maxDistance).toBeGreaterThanOrEqual(3.2);
+      expect(limits.maxDistance).toBeGreaterThanOrEqual(6.4);
       expect(limits.maxDistance).toBeGreaterThan(limits.minDistance);
     }
   });

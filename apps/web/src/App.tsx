@@ -1,5 +1,5 @@
 import {
-  AlertTriangle, Activity, Box, CheckCircle2, ChevronDown, Copy, Edit3, FlaskConical,
+  AlertTriangle, Activity, Box, CheckCircle2, ChevronDown, Copy, Download, Edit3, FlaskConical,
   Focus, FolderOpen, Gauge, Globe, Info, Link2, LoaderCircle, Magnet, Move3D, PackageOpen, Play, Redo2,
   Rotate3D, RotateCcw, Save, Scale3D, Share2, Sparkles, Trash2, Trophy, Undo2, X,
 } from "lucide-react";
@@ -15,6 +15,7 @@ import {
   listRememberedDesigns, rememberCloudDesign, updateDesign,
 } from "./api/designs";
 import { MATERIAL_ORDER, MATERIAL_VISUALS } from "./editor/materialVisuals";
+import { captureBuildThumbnail } from "./scene/buildSnapshot";
 import { freshDesign, getBodyTransform, useEditorStore, type TransformMode } from "./editor/store";
 import {
   MAX_DROP_PLAYBACK_RATE,
@@ -244,6 +245,15 @@ function WeightField({ part, disabled }: { part: DesignPartV1; disabled: boolean
   );
 }
 
+/** Connection endpoint name: "Egg", or the part's material numbered within its kind ("Balloon 2"). */
+function connectionBodyLabel(design: DesignV1, bodyId: string): string {
+  if (bodyId === "egg") return "Egg";
+  const part = design.parts.find((candidate) => candidate.id === bodyId);
+  if (!part) return "Part";
+  const kindIndex = design.parts.filter((candidate) => candidate.materialId === part.materialId).findIndex((candidate) => candidate.id === bodyId);
+  return `${MATERIAL_VISUALS[part.materialId].shortLabel} ${kindIndex + 1}`;
+}
+
 function Inspector({ readOnly, onDeleteCloud }: { readOnly: boolean; onDeleteCloud: () => void }) {
   const design = useEditorStore((state) => state.design);
   const selectedId = useEditorStore((state) => state.selectedId);
@@ -265,7 +275,7 @@ function Inspector({ readOnly, onDeleteCloud }: { readOnly: boolean; onDeleteClo
         <div className="empty-inspector"><PackageOpen size={34} /><h2>Nothing selected</h2><p>Click the egg or a material to inspect and transform it.</p></div>
       ) : (
         <>
-          <h2>{selectedId === "egg" ? "Your egg" : visual?.shortLabel}</h2>
+          <h2>{selectedId === "egg" ? "Your egg" : connectionBodyLabel(design, selectedId)}</h2>
           <div className="selection-card">
             <span style={{ background: visual?.accent ?? "#fff0c2" }}>{visual?.emoji ?? "🥚"}</span>
             <div><strong>{selectedId === "egg" ? "Chicken egg" : visual?.label}</strong><small>{Math.round(mass * 1000)} g · {selectedId === "egg" ? "fragile core" : visual?.behavior.toLowerCase()}</small></div>
@@ -280,9 +290,12 @@ function Inspector({ readOnly, onDeleteCloud }: { readOnly: boolean; onDeleteClo
       )}
       <div className="joint-list">
         <div><span>Connections</span><b>{design.joints.length}</b></div>
-        {design.joints.length === 0 ? <p>Use tape, string, or a rubber band to hold pieces together.</p> : design.joints.map((joint, index) => (
-          <div className="joint-row" key={joint.id}><span>{MATERIAL_VISUALS[joint.materialId].emoji}</span><div><strong>{MATERIAL_VISUALS[joint.materialId].shortLabel} {index + 1}</strong><small>{joint.bodyA === "egg" ? "Egg" : `Part ${design.parts.findIndex((part) => part.id === joint.bodyA) + 1}`} → {joint.bodyB === "egg" ? "Egg" : `Part ${design.parts.findIndex((part) => part.id === joint.bodyB) + 1}`}</small></div>{!readOnly && <button onClick={() => removeJoint(joint.id)} aria-label="Remove connection"><X size={13} /></button>}</div>
-        ))}
+        {design.joints.length === 0 ? <p>Use tape, string, or a rubber band to hold pieces together.</p> : design.joints.map((joint, index) => {
+          const attached = selectedId !== null && (joint.bodyA === selectedId || joint.bodyB === selectedId);
+          return (
+            <div className={`joint-row${attached ? " attached" : ""}`} key={joint.id}><span>{MATERIAL_VISUALS[joint.materialId].emoji}</span><div><strong>{MATERIAL_VISUALS[joint.materialId].shortLabel} {index + 1}</strong><small>{connectionBodyLabel(design, joint.bodyA)} → {connectionBodyLabel(design, joint.bodyB)}</small></div>{!readOnly && <button onClick={() => removeJoint(joint.id)} aria-label="Remove connection"><X size={13} /></button>}</div>
+          );
+        })}
       </div>
       <div className="tip-card"><b>💡</b><div><strong>Engineer’s tip</strong><p>Build a cage first, then add soft materials where the egg may strike.</p></div></div>
       {cloud.id && !cloud.readOnly && <button className="delete-cloud" onClick={onDeleteCloud}><Trash2 size={13} /> Delete cloud copy</button>}
@@ -335,6 +348,7 @@ function DropSetup() {
   const mission = design.mode === "challenge" && design.missionId ? MISSION_BY_ID[design.missionId] : null;
   const gravityBody = GRAVITY_BODIES[gravityBodyId];
   const gravityMps2 = gravityMps2ForBody(gravityBodyId);
+  const airDensityKgM3 = airDensityKgM3ForBody(gravityBodyId);
   const gravityIndex = GRAVITY_BODY_IDS.indexOf(gravityBodyId);
   const heightSpanFt = MAX_DROP_HEIGHT_FT - MIN_DROP_HEIGHT_FT;
   return (
@@ -349,8 +363,20 @@ function DropSetup() {
         <input className="height-slider" type="range" min={MIN_DROP_HEIGHT_FT} max={MAX_DROP_HEIGHT_FT} step="0.5" value={design.heightFt} onChange={(event) => setHeight(Number(event.target.value))} aria-label="Drop height in feet" />
         <div className="slider-labels"><span>{MIN_DROP_HEIGHT_FT} ft</span>{mission && <b style={{ left: `${((mission.targetHeightFt - MIN_DROP_HEIGHT_FT) / heightSpanFt) * 100}%` }}>★ {mission.targetHeightFt} ft target</b>}<span>{MAX_DROP_HEIGHT_FT} ft</span></div>
         <div className="playback-control">
-          <div className="playback-heading"><div><Globe size={14} /><span>Gravity</span></div><strong>{gravityBody.label}</strong></div>
-          <p>Surface gravity from the Moon through Jupiter. Stronger gravity pulls harder and lands faster.</p>
+          <div className="playback-heading"><div><Globe size={14} /><span>Planet</span></div><strong>{gravityBody.label}</strong></div>
+          <p>
+            Each world has its own gravity and atmosphere. Stronger gravity pulls harder; thicker air adds drag, wind, and balloon lift
+            {airDensityKgM3 <= 0
+              ? " — the Moon has no air, so nothing slows the fall and balloons cannot lift."
+              : (() => {
+                const earthRatio = airDensityKgM3 / 1.225;
+                if (earthRatio < 0.05) {
+                  return ` — ${gravityBody.label} air is extremely thin, so drag and balloon lift are weak.`;
+                }
+                const ratioText = earthRatio >= 10 ? earthRatio.toFixed(0) : earthRatio.toFixed(1);
+                return ` — ${gravityBody.label} air is about ${ratioText}× as dense as Earth’s, so falls and floats feel different.`;
+              })()}
+          </p>
           <input
             className="playback-slider"
             type="range"
@@ -359,14 +385,14 @@ function DropSetup() {
             step={1}
             value={gravityIndex}
             onChange={(event) => setGravityBodyId(GRAVITY_BODY_IDS[Number(event.target.value)]!)}
-            aria-label="Gravity strength"
-            aria-valuetext={`${gravityBody.label}, ${gravityMps2.toFixed(2)} meters per second squared`}
+            aria-label="Planet"
+            aria-valuetext={`${gravityBody.label}, ${gravityMps2.toFixed(2)} meters per second squared, ${airDensityKgM3 <= 0 ? "no atmosphere" : `${airDensityKgM3.toFixed(2)} kilograms per cubic meter air`}`}
           />
           <div className="playback-labels"><span>Moon</span><span>Earth</span><span>Jupiter</span></div>
         </div>
         <div className="playback-control">
           <div className="playback-heading"><div><Play size={14} /><span>Playback speed</span></div><strong>{playbackRate.toFixed(1)}×</strong></div>
-          <p>Changes how fast you watch. Gravity, damage, metrics, and score stay the same.</p>
+          <p>Changes how fast you watch. Planet, damage, metrics, and score stay the same.</p>
           <input
             className="playback-slider"
             type="range"
@@ -393,13 +419,19 @@ function ResultModal() {
   const editBuild = useEditorStore((state) => state.editBuild);
   if (!result) return null;
   const survived = result.outcome === "survived";
+  const airborne = result.outcome === "airborne";
+  const copy = airborne
+    ? { icon: "🎈", title: "Time's up — still airborne!", detail: "The egg never landed. Trim lift or add weight so the contraption actually comes down." }
+    : survived
+      ? { icon: "🥚", title: "The egg survived!", detail: "Your contraption kept the shell below its damage limit." }
+      : { icon: "🍳", title: "Crack! Back to the lab.", detail: "The shell absorbed too much force. Try more cushioning, drag, or space to decelerate." };
   return (
     <div className="modal-backdrop result-backdrop">
-      <section className={`result-card modal-card ${survived ? "success" : "cracked"}`} role="dialog" aria-modal="true" aria-labelledby="result-title">
-        <div className="result-icon">{survived ? "🥚" : "🍳"}</div>
+      <section className={`result-card modal-card ${survived || airborne ? "success" : "cracked"}`} role="dialog" aria-modal="true" aria-labelledby="result-title">
+        <div className="result-icon">{copy.icon}</div>
         <span className="eyebrow">TEST COMPLETE</span>
-        <h2 id="result-title">{survived ? "The egg survived!" : "Crack! Back to the lab."}</h2>
-        <p>{survived ? "Your contraption kept the shell below its damage limit." : "The shell absorbed too much force. Try more cushioning, drag, or space to decelerate."}</p>
+        <h2 id="result-title">{copy.title}</h2>
+        <p>{copy.detail}</p>
         <div className="metric-grid">
           <div><span>Drop height</span><strong>{result.heightFt.toFixed(1)} ft</strong></div>
           <div><span>Impact speed</span><strong>{result.impactSpeedMps.toFixed(1)} m/s</strong></div>
@@ -419,7 +451,7 @@ function CloudMenu({ open, close }: { open: boolean; close: () => void }) {
   return (
     <div className="cloud-menu">
       <div><strong>My cloud designs</strong><button onClick={close}><X size={14} /></button></div>
-      {items.length === 0 ? <p>No saved designs on this device yet.</p> : items.map((item) => <a key={item.id} href={`/design/${item.id}`}><span>🥚</span><div><strong>{item.name}</strong><small>{new Date(item.updatedAt).toLocaleDateString()}</small></div></a>)}
+      {items.length === 0 ? <p>No saved designs on this device yet.</p> : items.map((item) => <a key={item.id} href={`/design/${item.id}`}>{item.thumbnail ? <img src={item.thumbnail} alt="" /> : <span>🥚</span>}<div><strong>{item.name}</strong><small>{new Date(item.updatedAt).toLocaleDateString()}</small></div></a>)}
     </div>
   );
 }
@@ -568,17 +600,21 @@ export function App() {
   const save = async (forceNew = false): Promise<PublicDesign | null> => {
     if (readOnly && !forceNew) return null;
     setCloud({ saving: true });
+    // Snapshot the build view now so "My cloud designs" can show what this
+    // save looks like; null when the build canvas is not mounted, in which
+    // case the previous thumbnail is kept.
+    const thumbnail = captureBuildThumbnail();
     try {
       if (!forceNew && cloud.id && cloud.editToken && cloud.version) {
         const updated = await updateDesign(cloud.id, design, cloud.editToken, cloud.version);
-        rememberCloudDesign(updated);
+        rememberCloudDesign(updated, undefined, thumbnail);
         setSavedFingerprint(JSON.stringify(updated.design));
         setCloud({ version: updated.version, saving: false });
         setToast({ kind: "success", message: "Cloud design updated." });
         return updated;
       }
       const created = await createDesign(design);
-      rememberCloudDesign(created, created.editToken);
+      rememberCloudDesign(created, created.editToken, thumbnail);
       setSavedFingerprint(JSON.stringify(created.design));
       setCloud({ id: created.id, version: created.version, editToken: created.editToken, readOnly: false, saving: false });
       history.replaceState({}, "", `/design/${created.id}`);
@@ -604,6 +640,18 @@ export function App() {
     const url = `${location.origin}/design/${cloud.id}`;
     try { await navigator.clipboard.writeText(url); setToast({ kind: "success", message: "Read-only share link copied." }); }
     catch { setToast({ kind: "warning", message: url }); }
+  };
+
+  const exportJson = () => {
+    const safeName = design.name.trim().toLowerCase().replace(/[^\w-]+/g, "-").replace(/^-+|-+$/g, "") || "egg-drop-design";
+    const blob = new Blob([JSON.stringify(design, null, 2)], { type: "application/json" });
+    const url = URL.createObjectURL(blob);
+    const anchor = document.createElement("a");
+    anchor.href = url;
+    anchor.download = `${safeName}.json`;
+    anchor.click();
+    URL.revokeObjectURL(url);
+    setToast({ kind: "success", message: "Design exported as JSON." });
   };
 
   const remix = () => {
@@ -657,6 +705,7 @@ export function App() {
           {readOnly ? <button className="remix-button" onClick={remix}><Copy size={15} /> Remix</button> : <button className="my-designs-button" onClick={() => setCloudMenu((open) => !open)}><FolderOpen size={15} /><span>My designs</span></button>}
           {!readOnly && <button className="primary-small" onClick={() => void save()} disabled={cloud.saving}>{cloud.saving ? <LoaderCircle className="spin" size={15} /> : <Save size={15} />}<span>{cloud.id ? "Update" : "Save"}</span></button>}
           <button onClick={() => void share()} disabled={cloud.saving} title={!cloud.id ? "Save before sharing" : cloudDirty ? "Update before sharing" : "Copy share link"}><Share2 size={15} /><span>Share</span></button>
+          <button onClick={exportJson} title="Download this design as a JSON file"><Download size={15} /><span>Export JSON</span></button>
           <CloudMenu open={cloudMenu} close={() => setCloudMenu(false)} />
         </div>
       </header>

@@ -22,6 +22,8 @@ import {
 } from "@react-three/rapier";
 import {
   MATERIAL_BY_ID,
+  SEA_LEVEL_AIR_DENSITY_KG_M3,
+  STANDARD_GRAVITY_MPS2,
   calculateBalloonSimMassKg,
   calculateBuoyantForceN,
   calculateDragForce,
@@ -32,6 +34,7 @@ import {
   type DesignJointV1,
   type DesignPartV1,
   type DesignV1,
+  type DropOutcome,
   type DropResult,
   type MaterialId,
 } from "@eggdrop/shared";
@@ -79,6 +82,22 @@ type DropSceneProps = {
 };
 
 const EGG_MASS_KG = .057;
+
+/**
+ * Rapier body damping is a stand-in for small unmodelled aero effects
+ * (surface flutter, micro-turbulence), so it must scale with the local
+ * atmosphere. Constant damping acted as phantom drag in vacuum: Moon landings
+ * arrived 6–29% below vacuum free-fall, with the deficit ranking exactly by
+ * the material's damping coefficient. Thin air scales it down (never up —
+ * dense-atmosphere drag is carried by the explicit aero model); a tiny floor
+ * stays for solver hygiene, never exceeding the material's own value.
+ */
+const SOLVER_HYGIENE_DAMPING = .01;
+export const atmosphericDamping = (baseDamping: number, airDensityKgM3: number): number =>
+  Math.max(
+    Math.min(baseDamping, SOLVER_HYGIENE_DAMPING),
+    baseDamping * Math.min(1, airDensityKgM3 / SEA_LEVEL_AIR_DENSITY_KG_M3),
+  );
 
 /** A body joined (directly or transitively) to a plastic bag, with its mass. */
 type BagLoadEntry = { bodyId: string; massKg: number };
@@ -377,6 +396,33 @@ const BALLOON_SHELL_FRICTION = .6;
 const BALL_APPROX_MATERIALS = new Set<MaterialId>(["balloon", "cottonBall", "newspaper", "packingPeanuts", "paperCup"]);
 
 /**
+ * Root id of each body's welded (fixed-joint) assembly, egg included; bodies
+ * not welded to anything are their own root. Balloon shell forces must never
+ * fire between members of the same welded assembly: the shell pushes the pair
+ * apart while the weld constraint pulls it back together, and that tug-of-war
+ * pumps energy every step. Three or more balloons taped to an egg diverged to
+ * the watchdog ceiling, and an egg sandwiched between two taped balloons
+ * launched above free-fall speed. Chained (tether) fixed joints do not weld.
+ */
+export const calculateWeldedAssemblyRoots = (design: DesignV1): Map<string, string> => {
+  const parent = new Map<string, string>();
+  const find = (id: string): string => {
+    const ancestor = parent.get(id) ?? id;
+    if (ancestor === id) return id;
+    const root = find(ancestor);
+    parent.set(id, root);
+    return root;
+  };
+  for (const joint of design.joints) {
+    if (joint.kind !== "fixed" || isChainedJoint(design, joint)) continue;
+    parent.set(find(joint.bodyA), find(joint.bodyB));
+  }
+  const roots = new Map<string, string>();
+  for (const id of ["egg", ...design.parts.map((part) => part.id)]) roots.set(id, find(id));
+  return roots;
+};
+
+/**
  * Squishy-balloon model. The outer shell between the rigid core and the
  * visual radius is a pneumatic compliant contact: internal gauge pressure
  * times the growing sphere-plane contact patch, stiffening as the stroke is
@@ -406,6 +452,7 @@ function BalloonSuspension({ design, refs }: { design: DesignV1; refs: BodyRefs 
         };
       }),
   ], [design]);
+  const weldedRoots = useMemo(() => calculateWeldedAssemblyRoots(design), [design]);
 
   useBeforePhysicsStep(() => {
     for (const balloon of balloons) {
@@ -452,6 +499,9 @@ function BalloonSuspension({ design, refs }: { design: DesignV1; refs: BodyRefs 
 
       const centerVec = new Vector3(center.x, center.y, center.z);
       for (const target of targets) {
+        // Welded pairs are one rigid body as far as the solver is concerned;
+        // the weld carries the load, so a shell force here only fights it.
+        if (weldedRoots.get(balloon.id) === weldedRoots.get(target.id)) continue;
         const other = refs[target.id]?.current;
         if (!other) continue;
         const position = other.translation();
@@ -587,8 +637,8 @@ function PhysicsPart({ part, offset, bodyRef, gravityMps2, airDensityKgM3, wind,
       quaternion={part.transform.rotation}
       friction={definition.physics.friction}
       restitution={definition.physics.restitution}
-      linearDamping={definition.physics.linearDamping}
-      angularDamping={definition.physics.angularDamping}
+      linearDamping={atmosphericDamping(definition.physics.linearDamping, airDensityKgM3)}
+      angularDamping={atmosphericDamping(definition.physics.angularDamping, airDensityKgM3)}
       ccd
       canSleep
       userData={{ bodyId: part.id, materialId: part.materialId, contactAreaM2 }}
@@ -769,7 +819,7 @@ function ChainSphericalJoint({
   return null;
 }
 
-function SegmentedChainConnector({ joint, plan, refs }: { joint: DesignJointV1; plan: RopeSegmentLayout[]; refs: BodyRefs }) {
+function SegmentedChainConnector({ joint, plan, refs, airDensityKgM3 }: { joint: DesignJointV1; plan: RopeSegmentLayout[]; refs: BodyRefs; airDensityKgM3: number }) {
   const totalLengthM = plan.reduce((sum, segment) => sum + segment.lengthM, 0);
   // Real string/tape is a few grams per metre; floor keeps the solver happy.
   const segmentMassKg = Math.max(.002, totalLengthM * .004 / plan.length);
@@ -784,8 +834,8 @@ function SegmentedChainConnector({ joint, plan, refs }: { joint: DesignJointV1; 
             colliders={false}
             position={segment.position}
             quaternion={segment.rotation}
-            linearDamping={.25}
-            angularDamping={.6}
+            linearDamping={atmosphericDamping(.25, airDensityKgM3)}
+            angularDamping={atmosphericDamping(.6, airDensityKgM3)}
             ccd
             canSleep
             userData={{ bodyId: id, materialId: joint.materialId, contactAreaM2: 0 }}
@@ -793,6 +843,10 @@ function SegmentedChainConnector({ joint, plan, refs }: { joint: DesignJointV1; 
             <CapsuleCollider
               args={[Math.max(.001, segment.lengthM / 2 - ROPE_SEGMENT_RADIUS_M), ROPE_SEGMENT_RADIUS_M]}
               mass={segmentMassKg}
+              // Sensor: the chain is held by spherical joints; solid capsules
+              // batting balloons or the egg inject impulses and the links
+              // visually "break apart" into a spray of brown segments.
+              sensor
             />
           </RigidBody>
         );
@@ -963,6 +1017,78 @@ export const calculateAssemblyContactPairs = (design: DesignV1): [string, string
   return pairs;
 };
 
+/** Overlapping balloon shells in the build pose: rigid cores fighting each
+ * other every step is the main source of balloon-cluster jitter. */
+export const calculateOverlappingBalloonPairs = (design: DesignV1): [string, string][] => {
+  const balloons = design.parts.filter((part) => part.materialId === "balloon");
+  const pairs: [string, string][] = [];
+  for (let i = 0; i < balloons.length; i += 1) {
+    for (let j = i + 1; j < balloons.length; j += 1) {
+      const a = balloons[i]!;
+      const b = balloons[j]!;
+      const centerA = new Vector3(...a.transform.position);
+      const centerB = new Vector3(...b.transform.position);
+      const radiusA = Math.max(...a.transform.dimensions) / 2;
+      const radiusB = Math.max(...b.transform.dimensions) / 2;
+      const overlap = radiusA + radiusB - centerA.distanceTo(centerB);
+      if (overlap > SUPPRESSION_OVERLAP_M) pairs.push([a.id, b.id]);
+    }
+  }
+  return pairs;
+};
+
+/**
+ * Hidden bracing welds for star-shaped weld hubs. Three or more fixed joints
+ * meeting at one body (typically balloons taped straight to the egg) are the
+ * worst case for the sequential impulse solver: every correction must funnel
+ * through the hub, and when the hub has tiny rotational inertia (the egg's is
+ * ~2e-5 kg·m²) each joint's fix swings the hub and violates its siblings, so
+ * the star oscillates and pumps energy — 3+ taped balloons used to diverge to
+ * the watchdog ceiling while the 2-balloon case stayed clean. The assembly is
+ * rigid by definition, so adding consistent spoke-to-spoke welds (a ring per
+ * hub) is kinematically a no-op; it just gives the solver direct paths that
+ * bypass the hub. The egg itself never gets extra constraints, and braces are
+ * dropped when a user joint on the hub breaks so debris separates honestly.
+ */
+export const calculateBracingJoints = (design: DesignV1, brokenJointIds?: ReadonlySet<string>): DesignJointV1[] => {
+  const pairKey = (a: string, b: string) => (a < b ? `${a}\0${b}` : `${b}\0${a}`);
+  const spokesByHub = new Map<string, string[]>();
+  const weldedKeys = new Set<string>();
+  for (const joint of design.joints) {
+    if (joint.kind !== "fixed" || isChainedJoint(design, joint)) continue;
+    if (brokenJointIds?.has(joint.id)) continue;
+    weldedKeys.add(pairKey(joint.bodyA, joint.bodyB));
+    spokesByHub.set(joint.bodyA, [...(spokesByHub.get(joint.bodyA) ?? []), joint.bodyB]);
+    spokesByHub.set(joint.bodyB, [...(spokesByHub.get(joint.bodyB) ?? []), joint.bodyA]);
+  }
+  const braces: DesignJointV1[] = [];
+  const seen = new Set<string>();
+  for (const [hub, spokes] of spokesByHub) {
+    if (spokes.length < 2) continue;
+    for (let index = 0; index < spokes.length; index += 1) {
+      const bodyA = spokes[index]!;
+      const bodyB = spokes[(index + 1) % spokes.length]!;
+      if (bodyA === bodyB || bodyA === "egg" || bodyB === "egg") continue;
+      const key = pairKey(bodyA, bodyB);
+      if (weldedKeys.has(key) || seen.has(key)) continue;
+      seen.add(key);
+      const transformA = transformForBody(design, bodyA);
+      const transformB = transformForBody(design, bodyB);
+      const worldMid = new Vector3(...transformA.position).add(new Vector3(...transformB.position)).multiplyScalar(.5);
+      braces.push({
+        id: `brace:${hub}:${bodyA}:${bodyB}`,
+        kind: "fixed",
+        materialId: "tape",
+        bodyA,
+        bodyB,
+        anchorA: localAnchorAtWorldPoint(transformA, worldMid.clone()),
+        anchorB: localAnchorAtWorldPoint(transformB, worldMid.clone()),
+      });
+    }
+  }
+  return braces;
+};
+
 /**
  * Rapier only exposes pair-wise contact disabling through joints, so each
  * suppressed pair gets a rope joint far longer than the scene ever gets —
@@ -976,19 +1102,37 @@ function AssemblyContactSuppressor({ bodyA, bodyB, refs }: { bodyA: string; body
   return null;
 }
 
-function PhysicsConnectors({ design, refs, chainPlans, brokenJointIds }: { design: DesignV1; refs: BodyRefs; chainPlans: ChainPlans; brokenJointIds: ReadonlySet<string> }) {
+function PhysicsConnectors({ design, refs, chainPlans, brokenJointIds, airDensityKgM3 }: { design: DesignV1; refs: BodyRefs; chainPlans: ChainPlans; brokenJointIds: ReadonlySet<string>; airDensityKgM3: number }) {
   const assemblyContactPairs = useMemo(() => calculateAssemblyContactPairs(design), [design]);
+  const overlappingBalloonPairs = useMemo(() => calculateOverlappingBalloonPairs(design), [design]);
+  const bracingJoints = useMemo(() => calculateBracingJoints(design, brokenJointIds), [design, brokenJointIds]);
+  const suppressedPairs = useMemo(() => {
+    const seen = new Set<string>();
+    const merged: [string, string][] = [];
+    for (const [bodyA, bodyB] of [...assemblyContactPairs, ...overlappingBalloonPairs]) {
+      const key = bodyA < bodyB ? `${bodyA}\0${bodyB}` : `${bodyB}\0${bodyA}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      merged.push([bodyA, bodyB]);
+    }
+    return merged;
+  }, [assemblyContactPairs, overlappingBalloonPairs]);
   return (
     <>
       {design.joints.map((joint) => {
         if (!refs[joint.bodyA] || !refs[joint.bodyB]) return null;
         if (brokenJointIds.has(joint.id)) return null;
-        if (chainPlans[joint.id]) return <SegmentedChainConnector key={joint.id} joint={joint} plan={chainPlans[joint.id]!} refs={refs} />;
+        if (chainPlans[joint.id]) return <SegmentedChainConnector key={joint.id} joint={joint} plan={chainPlans[joint.id]!} refs={refs} airDensityKgM3={airDensityKgM3} />;
         if (joint.kind === "fixed") return <FixedConnector key={joint.id} joint={joint} refs={refs} design={design} />;
         if (joint.kind === "rope") return <RopeConnector key={joint.id} joint={joint} refs={refs} design={design} />;
         return <SpringConnector key={joint.id} joint={joint} refs={refs} design={design} />;
       })}
-      {assemblyContactPairs.map(([bodyA, bodyB]) => (
+      {bracingJoints.map((joint) => (
+        refs[joint.bodyA] && refs[joint.bodyB]
+          ? <FixedConnector key={joint.id} joint={joint} refs={refs} design={design} />
+          : null
+      ))}
+      {suppressedPairs.map(([bodyA, bodyB]) => (
         refs[bodyA] && refs[bodyB]
           ? <AssemblyContactSuppressor key={`suppress:${bodyA}:${bodyB}`} bodyA={bodyA} bodyB={bodyB} refs={refs} />
           : null
@@ -1107,7 +1251,7 @@ export const calculateDropZoomLimits = (framingDistance: number) => {
   );
   return {
     minDistance: Math.max(.25, initialDistance * .42),
-    maxDistance: Math.max(3.2, initialDistance * 3),
+    maxDistance: Math.max(6.4, initialDistance * 6),
   };
 };
 
@@ -1493,8 +1637,8 @@ function DropWorld({ design, runId, running, playbackRate, gravityMps2, airDensi
           colliders={false}
           position={[design.eggTransform.position[0], design.eggTransform.position[1] + offset, design.eggTransform.position[2]]}
           quaternion={design.eggTransform.rotation}
-          linearDamping={.04}
-          angularDamping={.08}
+          linearDamping={atmosphericDamping(.04, airDensityKgM3)}
+          angularDamping={atmosphericDamping(.08, airDensityKgM3)}
           ccd
           userData={{ bodyId: "egg", materialId: "egg" }}
         >
@@ -1509,7 +1653,7 @@ function DropWorld({ design, runId, running, playbackRate, gravityMps2, airDensi
           <EggAerodynamicForces bodyRef={refs.egg!} dimensions={design.eggTransform.dimensions} airDensityKgM3={airDensityKgM3} wind={wind} />
         </RigidBody>
         {design.parts.map((part) => <PhysicsPart key={part.id} part={part} offset={offset} bodyRef={refs[part.id]!} gravityMps2={gravityMps2} airDensityKgM3={airDensityKgM3} wind={wind} load={bagLoads[part.id] ? { entries: bagLoads[part.id]!, refs } : undefined} />)}
-        <PhysicsConnectors design={design} refs={refs} chainPlans={chainPlans} brokenJointIds={brokenJointIds} />
+        <PhysicsConnectors design={design} refs={refs} chainPlans={chainPlans} brokenJointIds={brokenJointIds} airDensityKgM3={airDensityKgM3} />
         <JointBreakMonitor design={design} refs={refs} chainPlans={chainPlans} brokenJointIds={brokenJointIds} gravityMps2={gravityMps2} onBreak={(jointId) => setBrokenJointIds((previous) => previous.has(jointId) ? previous : new Set(previous).add(jointId))} />
         <BalloonSuspension design={design} refs={refs} />
         <SolverTuning design={design} refs={refs} />
@@ -1544,7 +1688,7 @@ function MonitorBridge({ handlers, design, refs, eggRef, running, playbackRate, 
   const realElapsed = useRef(0);
   const settleTime = useRef(0);
   const completed = useRef(false);
-  const pendingOutcome = useRef<"survived" | "cracked" | null>(null);
+  const pendingOutcome = useRef<DropOutcome | null>(null);
   const outcomeRevealTime = useRef(0);
   const outcomeRevealStarted = useRef(false);
   const impactSpeed = useRef(0);
@@ -1558,6 +1702,7 @@ function MonitorBridge({ handlers, design, refs, eggRef, running, playbackRate, 
   const previousStepVelocity = useRef<Vector3 | null>(null);
   const filteredAccelerationG = useRef(0);
   const recentRelativeSpeeds = useRef<Record<string, number>>({});
+  const recentContactShellG = useRef<number[]>([]);
   const crackPending = useRef(false);
   const runawayStrikes = useRef(0);
   const watchdogTripped = useRef(false);
@@ -1628,7 +1773,7 @@ function MonitorBridge({ handlers, design, refs, eggRef, running, playbackRate, 
     };
   };
 
-  const finish = (outcome: "survived" | "cracked") => {
+  const finish = (outcome: DropOutcome) => {
     if (completed.current) return;
     completed.current = true;
     // An egg that rides a contraption down may never touch anything itself,
@@ -1712,7 +1857,11 @@ function MonitorBridge({ handlers, design, refs, eggRef, running, playbackRate, 
     const previous = previousStepVelocity.current;
     if (previous && physicsElapsed.current >= DROP_DAMAGE_ARM_SECONDS) {
       const nonGravityDelta = eggVelocity.clone().sub(previous).sub(new Vector3(0, -gravityMps2 * DROP_FIXED_STEP_SECONDS, 0));
-      const sampledG = nonGravityDelta.length() / DROP_FIXED_STEP_SECONDS / gravityMps2;
+      // G is a planet-independent unit: the same deceleration must read the
+      // same load everywhere. Dividing by the local gravity made identical
+      // impacts read 300 G on the Moon and 99 G on Jupiter, and silently
+      // scaled the fixed damage thresholds by 1/g per planet.
+      const sampledG = nonGravityDelta.length() / DROP_FIXED_STEP_SECONDS / STANDARD_GRAVITY_MPS2;
       // Filter retention and damage accumulation are per-step quantities
       // originally tuned at 60 Hz; scale them so behaviour is step-rate
       // independent.
@@ -1722,8 +1871,11 @@ function MonitorBridge({ handlers, design, refs, eggRef, running, playbackRate, 
       if (filteredG > 4) {
         const { cushioning, areaRelief } = nearbyProtection();
         const effectiveShellG = filteredG * (1 - cushioning * .78) * (1 - areaRelief);
-        peakG.current = Math.max(peakG.current, filteredG);
-        peakForce.current = Math.max(peakForce.current, EGG_MASS_KG * filteredG * gravityMps2);
+        // Report the load the shell actually felt (post-cushioning): the raw
+        // solver-step value showed 163 G for a 6.5 m/s landing onto foam that
+        // kinematically decelerates the egg at ~25 G.
+        peakG.current = Math.max(peakG.current, effectiveShellG);
+        peakForce.current = Math.max(peakForce.current, EGG_MASS_KG * effectiveShellG * STANDARD_GRAVITY_MPS2);
         if (effectiveShellG >= 80) addDamage(effectiveShellG / 80 * STEP_RATE_SCALE);
         else if (effectiveShellG > 20) addDamage((effectiveShellG - 20) / 80 * .08 * STEP_RATE_SCALE);
       }
@@ -1739,7 +1891,17 @@ function MonitorBridge({ handlers, design, refs, eggRef, running, playbackRate, 
     const otherBodyId = otherUserData?.bodyId ?? "ground";
     const otherVelocity = payload.other.rigidBody?.linvel() ?? { x: 0, y: 0, z: 0 };
     const fallbackRelative = preStepVelocity.current.clone().sub(new Vector3(otherVelocity.x, otherVelocity.y, otherVelocity.z)).length();
-    const relativeSpeed = Math.max(fallbackRelative, recentRelativeSpeeds.current[otherBodyId] ?? 0);
+    // The egg's own pre-contact speed. The relative speed feeds the damage
+    // estimate only: a loose part flung by the landing (a straw kicked to
+    // 20+ m/s) once made the "impact speed" read above vacuum free-fall, and
+    // an egg riding a cushioned raft under-reported a 10 m/s arrival as 3.
+    // Clamp the relative speed too, so a solver-kicked part cannot claim the
+    // egg was decelerated harder than any physical closing speed allows.
+    const eggSpeed = preStepVelocity.current.length();
+    const relativeSpeed = Math.min(
+      Math.max(fallbackRelative, recentRelativeSpeeds.current[otherBodyId] ?? 0),
+      eggSpeed + maxPlausibleSpeed,
+    );
     recentRelativeSpeeds.current[otherBodyId] = 0;
     if (relativeSpeed < .35) return;
     const { cushioning, areaRelief } = contactProperties(payload);
@@ -1753,21 +1915,32 @@ function MonitorBridge({ handlers, design, refs, eggRef, running, playbackRate, 
     const massFactor = typeof otherBody?.isDynamic === "function" && typeof otherBody.mass === "function" && otherBody.isDynamic()
       ? otherBody.mass() / (otherBody.mass() + EGG_MASS_KG)
       : 1;
-    const eventG = Math.min(300, relativeSpeed * massFactor / impactDuration / gravityMps2);
+    const eventG = Math.min(300, relativeSpeed * massFactor / impactDuration / STANDARD_GRAVITY_MPS2);
     const effectiveShellG = eventG * (1 - cushioning * .78) * (1 - areaRelief);
-    impactSpeed.current = Math.max(impactSpeed.current, relativeSpeed);
-    peakG.current = Math.max(peakG.current, eventG);
-    peakForce.current = Math.max(peakForce.current, EGG_MASS_KG * eventG * gravityMps2);
+    impactSpeed.current = Math.max(impactSpeed.current, eggSpeed);
+    peakG.current = Math.max(peakG.current, effectiveShellG);
+    peakForce.current = Math.max(peakForce.current, EGG_MASS_KG * effectiveShellG * STANDARD_GRAVITY_MPS2);
     addDamage(effectiveShellG / 80);
   };
   handlers.current.contact = (payload) => {
     if (!running || completed.current) return;
     const force = Math.max(payload.maxForceMagnitude, payload.totalForceMagnitude);
-    const forceG = force / EGG_MASS_KG / gravityMps2;
+    const forceG = force / EGG_MASS_KG / STANDARD_GRAVITY_MPS2;
     const { cushioning, areaRelief } = contactProperties(payload);
     const effectiveShellG = forceG * (1 - cushioning * .78) * (1 - areaRelief);
-    peakForce.current = Math.max(peakForce.current, force);
-    peakG.current = Math.max(peakG.current, Math.min(300, forceG));
+    // Rapier's per-event force is a single 240 Hz solver impulse; a lone
+    // spike saturated the display (300 G / 240 N from a 1.1 m/s bumpered
+    // landing). A real crush lasts many steps, so only the running median of
+    // a sustained burst feeds the reported peaks; damage keeps seeing every
+    // event so a genuine sharp hit still counts against the shell.
+    const window = recentContactShellG.current;
+    window.push(effectiveShellG);
+    if (window.length > 5) window.shift();
+    if (window.length >= 3) {
+      const medianShellG = Math.min(300, [...window].sort((a, b) => a - b)[Math.floor((window.length - 1) / 2)]!);
+      peakG.current = Math.max(peakG.current, medianShellG);
+      peakForce.current = Math.max(peakForce.current, EGG_MASS_KG * medianShellG * STANDARD_GRAVITY_MPS2);
+    }
     if (effectiveShellG > 32) addDamage((effectiveShellG - 32) / 80 * .08);
   };
   useFrame((_, delta) => {
@@ -1837,8 +2010,19 @@ function MonitorBridge({ handlers, design, refs, eggRef, running, playbackRate, 
     // the egg visibly comes to rest, regardless of the slow-motion playback rate.
     if (elapsed.current > .35 && nearGround && eggSettled) settleTime.current += delta;
     else settleTime.current = 0;
-    if (settleTime.current >= DROP_SETTLE_REAL_SECONDS || elapsed.current >= DROP_SIMULATION_TIMEOUT_SECONDS || realElapsed.current >= maxWallSeconds) {
+    if (settleTime.current >= DROP_SETTLE_REAL_SECONDS) {
       pendingOutcome.current = "survived";
+      outcomeRevealTime.current = 0;
+      outcomeRevealStarted.current = false;
+    } else if (elapsed.current >= DROP_SIMULATION_TIMEOUT_SECONDS || realElapsed.current >= maxWallSeconds) {
+      // Time ran out. "Survived" while the egg is still floating (or rising
+      // past the tower top on a balloon lift) misrepresents the run: nothing
+      // landed. Publish a distinct airborne outcome for eggs still well off
+      // the ground.
+      const eggAltitudeM = eggBody
+        ? eggBody.translation().y - (bodyHalfExtents.egg ?? 0)
+        : 0;
+      pendingOutcome.current = !nearGround && eggAltitudeM > 1 ? "airborne" : "survived";
       outcomeRevealTime.current = 0;
       outcomeRevealStarted.current = false;
     }

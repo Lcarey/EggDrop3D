@@ -1,5 +1,5 @@
 import { ContactShadows, Grid, Line, OrbitControls, PerspectiveCamera, TransformControls } from "@react-three/drei";
-import { Canvas, type ThreeEvent } from "@react-three/fiber";
+import { Canvas, useThree, type ThreeEvent } from "@react-three/fiber";
 import type { DesignPartV1, MaterialId, Transform } from "@eggdrop/shared";
 import { snapVec3 } from "@eggdrop/shared";
 import { Suspense, useEffect, useMemo, useRef, useState } from "react";
@@ -8,6 +8,7 @@ import { DEFAULT_DIMENSIONS, useEditorStore, getBodyTransform } from "../editor/
 import { MATERIAL_VISUALS } from "../editor/materialVisuals";
 import { EggVisual, PartVisual } from "./PartVisual";
 import { LabEnvironment, LandingGround } from "./scenery";
+import { registerBuildSnapshotSource } from "./buildSnapshot";
 
 type BuildSceneProps = { editable: boolean; fitNonce: number };
 type SolidMaterialId = keyof typeof DEFAULT_DIMENSIONS;
@@ -237,11 +238,24 @@ function PlacementPlane({ editable }: { editable: boolean }) {
   );
 }
 
+/** Exposes the renderer/scene/camera so the Save flow can capture a thumbnail. */
+function BuildSnapshotBridge() {
+  const gl = useThree((state) => state.gl);
+  const scene = useThree((state) => state.scene);
+  const camera = useThree((state) => state.camera);
+  useEffect(() => {
+    registerBuildSnapshotSource({ gl, scene, camera });
+    return () => registerBuildSnapshotSource(null);
+  }, [gl, scene, camera]);
+  return null;
+}
+
 function BuildWorld({ editable, fitNonce }: BuildSceneProps) {
   const parts = useEditorStore((state) => state.design.parts);
   const [orbitEnabled, setOrbitEnabled] = useState(true);
   return (
     <>
+      <BuildSnapshotBridge />
       <SceneCamera fitNonce={fitNonce} />
       <color attach="background" args={["#bfe3ef"]} />
       <fog attach="fog" args={["#d9edf2", 3.5, 7]} />

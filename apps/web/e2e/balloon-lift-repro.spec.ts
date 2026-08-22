@@ -69,7 +69,7 @@ test("a rising balloon lift with a long tape tether keeps physically plausible s
 
   await page.getByRole("button", { name: /set up drop/i }).click();
   const setup = page.getByRole("dialog", { name: /how high/i });
-  await setup.getByRole("slider", { name: "Gravity strength" }).fill("3");
+  await setup.getByRole("slider", { name: "Planet" }).fill("3");
   // 0.1x playback matches the recording where the runaway was observed.
   await setup.getByRole("slider", { name: "Drop playback speed" }).fill("0.1");
   await setup.getByRole("button", { name: /release contraption/i }).click();

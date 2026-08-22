@@ -11,8 +11,13 @@ import type { Vec3 } from "@eggdrop/shared";
 
 export const ROPE_SEGMENT_TARGET_LENGTH_M = 0.07;
 export const ROPE_SEGMENT_RADIUS_M = 0.004;
-/** Connectors shorter than this stay a single plain joint. */
-export const MIN_SEGMENTED_ROPE_LENGTH_M = 0.15;
+/**
+ * Connectors shorter than this stay a single plain joint (rope or tape).
+ * Egg-to-balloon links are typically 0.2–0.5 m; segmenting those into a
+ * dozen capsule links lets the segments collide with the balloons and fly
+ * apart. Only metre-class tethers (balloon-lift tape spans) need a chain.
+ */
+export const MIN_SEGMENTED_ROPE_LENGTH_M = 0.85;
 
 export type RopeSegmentLayout = {
   /** World position of the segment centre. */

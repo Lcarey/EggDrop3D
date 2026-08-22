@@ -70,7 +70,12 @@ export interface DesignV1 {
   joints: DesignJointV1[];
 }
 
-export const DROP_OUTCOMES = ["survived", "cracked"] as const;
+/**
+ * "airborne" ends a run whose simulation time expired while the egg was still
+ * well off the ground (balloon floaters, Venus ascents): the shell is intact,
+ * but nothing landed, so it neither scores nor counts as a survival.
+ */
+export const DROP_OUTCOMES = ["survived", "cracked", "airborne"] as const;
 
 export type DropOutcome = (typeof DROP_OUTCOMES)[number];
 

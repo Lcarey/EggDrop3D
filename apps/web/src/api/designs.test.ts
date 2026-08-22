@@ -85,4 +85,19 @@ describe("design API client", () => {
     expect(getEditToken(design.id)).toBeNull();
     expect(listRememberedDesigns()).toEqual([]);
   });
+
+  it("stores a build thumbnail with the index entry and keeps it across thumbnail-less saves", () => {
+    const design = publicDesign();
+    rememberCloudDesign(design, "edit-secret", "data:image/jpeg;base64,abc");
+    expect(listRememberedDesigns()[0]?.thumbnail).toBe("data:image/jpeg;base64,abc");
+
+    // e.g. updating from a stage where the build canvas is not mounted
+    rememberCloudDesign({ ...design, version: 2, updatedAt: "2026-08-22T12:00:00.000Z" }, undefined, null);
+    const [entry] = listRememberedDesigns();
+    expect(entry?.thumbnail).toBe("data:image/jpeg;base64,abc");
+    expect(entry?.updatedAt).toBe("2026-08-22T12:00:00.000Z");
+
+    rememberCloudDesign(design, undefined, "data:image/jpeg;base64,def");
+    expect(listRememberedDesigns()[0]?.thumbnail).toBe("data:image/jpeg;base64,def");
+  });
 });
