@@ -1,7 +1,10 @@
 import { Line, RoundedBox } from "@react-three/drei";
-import type { MaterialId, Transform } from "@eggdrop/shared";
+import type { MaterialId } from "@eggdrop/shared";
 import { DoubleSide } from "three";
 import { MATERIAL_VISUALS } from "../editor/materialVisuals";
+import { EggVisual } from "./EggVisual";
+
+export { EggVisual };
 
 type PartVisualProps = {
   materialId: MaterialId;
@@ -94,25 +97,4 @@ export function PartVisual({ materialId, selected = false, ghost = false }: Part
     default:
       return null;
   }
-}
-
-export function EggVisual({ transform, selected = false, cracked = false }: { transform: Transform; selected?: boolean; cracked?: boolean }) {
-  if (cracked) {
-    return (
-      <group scale={transform.dimensions}>
-        <mesh position={[-.35, 0, 0]} rotation={[0, 0, .45]} castShadow><sphereGeometry args={[.52, 24, 16, 0, Math.PI]} /><meshStandardMaterial color="#f7ead2" roughness={.72} side={DoubleSide} /></mesh>
-        <mesh position={[.35, 0, 0]} rotation={[0, Math.PI, -.45]} castShadow><sphereGeometry args={[.52, 24, 16, 0, Math.PI]} /><meshStandardMaterial color="#f7ead2" roughness={.72} side={DoubleSide} /></mesh>
-        <mesh position={[0, -.3, 0]} scale={[.46,.18,.46]}><sphereGeometry args={[.5,20,12]} /><meshPhysicalMaterial color="#f7ac1a" roughness={.3} /></mesh>
-      </group>
-    );
-  }
-  return (
-    <group scale={transform.dimensions}>
-      <mesh castShadow receiveShadow scale={[5, 5, 5]}>
-        <sphereGeometry args={[0.1, 36, 28]} />
-        <meshPhysicalMaterial color="#f7ead2" roughness={0.62} clearcoat={0.08} emissive={selected ? "#2b80ce" : "#000"} emissiveIntensity={selected ? .18 : 0} />
-      </mesh>
-      {selected && <mesh rotation={[-Math.PI / 2, 0, 0]} position={[0, -0.55, 0]} scale={[5.8, 5.8, 5.8]}><ringGeometry args={[.105,.12,32]} /><meshBasicMaterial color="#2b80ce" transparent opacity={.72} side={DoubleSide} /></mesh>}
-    </group>
-  );
 }

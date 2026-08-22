@@ -42,6 +42,9 @@ const resetStore = () => useEditorStore.setState({
   runId: 0,
   result: null,
   playbackRate: 0.2,
+  gravityBodyId: "earth",
+  liveEggSpeedMps: 0,
+  peakEggSpeedMps: 0,
   cloud: { id: null, version: null, editToken: null, readOnly: false, saving: false },
 });
 

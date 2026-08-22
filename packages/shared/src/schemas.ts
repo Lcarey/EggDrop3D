@@ -29,7 +29,7 @@ import {
 export const MAX_PARTS = 100;
 export const MAX_JOINTS = 200;
 export const MIN_DROP_HEIGHT_FT = 5;
-export const MAX_DROP_HEIGHT_FT = 50;
+export const MAX_DROP_HEIGHT_FT = 100;
 export const MAX_DESIGN_NAME_LENGTH = 60;
 
 const finiteNumber = z.number().finite();

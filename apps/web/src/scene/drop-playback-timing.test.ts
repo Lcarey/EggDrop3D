@@ -52,7 +52,7 @@ describe("drop playback timing", () => {
     expect(calculatePlaybackSimulationDelta(0.6, 0.1)).toBeCloseTo(0.1 * DROP_PLAYBACK_RATE, 12);
   });
 
-  it("advances fixed 1/60-second steps at 0.2× real time", () => {
+  it("advances fixed 1/240-second steps at 0.2× real time", () => {
     expect(DROP_PLAYBACK_RATE).toBe(0.2);
     const result = countFixedSteps([
       ...Array.from({ length: 30 }, () => 1 / 60),
@@ -60,18 +60,18 @@ describe("drop playback timing", () => {
     ]);
 
     expect(result.realElapsed).toBeCloseTo(5.5, 10);
-    expect(result.steps).toBe(60);
+    expect(result.steps).toBe(240);
     expect(result.accumulator).toBeCloseTo(0, 10);
   });
 
   it("scales elapsed simulation time from 0.1× through 2× without changing the fixed physics step", () => {
-    expect(DROP_FIXED_STEP_SECONDS).toBeCloseTo(1 / 60, 12);
+    expect(DROP_FIXED_STEP_SECONDS).toBeCloseTo(1 / 240, 12);
 
     for (const [playbackRate, expectedSteps] of [
-      [0.1, 6],
-      [0.2, 12],
-      [1, 60],
-      [2, 120],
+      [0.1, 24],
+      [0.2, 48],
+      [1, 240],
+      [2, 480],
     ] as const) {
       const result = countFixedSteps([
         ...Array.from({ length: 30 }, () => 1 / 60),
@@ -86,7 +86,7 @@ describe("drop playback timing", () => {
   it("is partition-invariant across 30, 60, and 120 Hz render frames", () => {
     for (const renderHz of [30, 60, 120]) {
       const result = countFixedSteps(Array.from({ length: renderHz * 5.5 }, () => 1 / renderHz));
-      expect(result.steps, `${renderHz} Hz`).toBe(60);
+      expect(result.steps, `${renderHz} Hz`).toBe(240);
       expect(result.accumulator, `${renderHz} Hz`).toBeCloseTo(0, 10);
     }
   });
@@ -194,28 +194,32 @@ describe("fixed tape setup", () => {
     expect(worldFrameA.angleTo(worldFrameB)).toBeLessThan(1e-10);
   });
 
-  it("suppresses contacts across a whole taped assembly, not just directly-taped pairs", () => {
+  const strawAt = (id: string, x: number, rotation: [number, number, number, number] = [0, 0, 0, 1]) => ({
+    id,
+    materialId: "straw" as const,
+    transform: {
+      position: [x, 0.4, 0] as [number, number, number],
+      rotation,
+      dimensions: [0.025, 0.42, 0.025] as [number, number, number],
+    },
+  });
+  const tape = (id: string, bodyA: string, bodyB: string) => ({
+    id,
+    kind: "fixed" as const,
+    materialId: "tape" as const,
+    bodyA,
+    bodyB,
+    anchorA: [0, 0.21, 0] as [number, number, number],
+    anchorB: [0, 0.21, 0] as [number, number, number],
+  });
+  const SIDEWAYS: [number, number, number, number] = [0, 0, Math.SQRT1_2, Math.SQRT1_2];
+
+  it("suppresses overlapping non-jointed pairs across a whole taped assembly", () => {
     const design = freshDesign();
-    const strawAt = (id: string, x: number) => ({
-      id,
-      materialId: "straw" as const,
-      transform: {
-        position: [x, 0.4, 0] as [number, number, number],
-        rotation: [0, 0, 0, 1] as [number, number, number, number],
-        dimensions: [0.025, 0.42, 0.025] as [number, number, number],
-      },
-    });
-    design.parts = [strawAt("a", -0.1), strawAt("b", 0), strawAt("c", 0.1), strawAt("loose", 0.5)];
-    const tape = (id: string, bodyA: string, bodyB: string) => ({
-      id,
-      kind: "fixed" as const,
-      materialId: "tape" as const,
-      bodyA,
-      bodyB,
-      anchorA: [0, 0.21, 0] as [number, number, number],
-      anchorB: [0, 0.21, 0] as [number, number, number],
-    });
-    // a-b-c is one taped chain; "loose" is only tied to the egg by string.
+    // Vertical straws a and c overlap each other (centres 10 mm apart, 25 mm
+    // wide); the sideways straw b crosses both. "loose" is far away, tied to
+    // the egg only by string.
+    design.parts = [strawAt("a", 0), strawAt("b", 0.005, SIDEWAYS), strawAt("c", 0.01), strawAt("loose", 0.5)];
     design.joints = [
       tape("t1", "a", "b"),
       tape("t2", "b", "c"),
@@ -230,9 +234,55 @@ describe("fixed tape setup", () => {
       },
     ];
 
-    // a-c share the assembly through b but have no joint of their own; those
-    // contacts would fight the tape constraints and visibly stretch them.
+    // a-c share the assembly through b, have no joint of their own, and
+    // interpenetrate in the build pose; those contacts would fight the tape
+    // constraints and visibly stretch them.
     expect(calculateAssemblyContactPairs(design)).toEqual([["a", "c"]]);
+  });
+
+  it("keeps load-bearing contacts between butted, non-overlapping assembly members", () => {
+    const design = freshDesign();
+    const shelf = {
+      id: "shelf",
+      materialId: "cardboard" as const,
+      transform: {
+        position: [0, 0.5, 0] as [number, number, number],
+        rotation: [0, 0, 0, 1] as [number, number, number, number],
+        dimensions: [0.4, 0.01, 0.4] as [number, number, number],
+      },
+    };
+    const legAt = (id: string, x: number) => ({
+      id,
+      materialId: "craftStick" as const,
+      transform: {
+        // Leg top face exactly butts the shelf underside (y = 0.495).
+        position: [x, 0.2475, 0] as [number, number, number],
+        rotation: [0, 0, 0, 1] as [number, number, number, number],
+        dimensions: [0.02, 0.495, 0.02] as [number, number, number],
+      },
+    });
+    design.parts = [shelf, legAt("leg1", -0.15), legAt("leg2", 0.15)];
+    design.joints = [tape("t1", "shelf", "leg1"), tape("t2", "shelf", "leg2")];
+
+    // leg1-leg2 share the assembly through the shelf but touch nothing; their
+    // contacts (and the butted shelf contacts) must stay on to brace the
+    // table, or it sags through itself after landing.
+    expect(calculateAssemblyContactPairs(design)).toEqual([]);
+  });
+
+  it("never suppresses contacts involving the egg but still bridges assemblies through it", () => {
+    const design = freshDesign();
+    // Both straws overlap the egg's position and each other.
+    design.parts = [strawAt("a", -0.005), strawAt("b", 0.005)];
+    design.parts.forEach((part) => { part.transform.position[1] = 0.38; });
+    design.joints = [tape("t1", "egg", "a"), tape("t2", "egg", "b")];
+
+    const pairs = calculateAssemblyContactPairs(design);
+    // a and b form one assembly through the egg and interpenetrate, so their
+    // mutual contacts are suppressed — but no pair may ever include the egg,
+    // or a collapsing structure can push the egg through a panel unopposed.
+    expect(pairs).toEqual([["a", "b"]]);
+    expect(pairs.flat()).not.toContain("egg");
   });
 
   it("keeps contacts alive between separate assemblies and rope-tied bodies", () => {

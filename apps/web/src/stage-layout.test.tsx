@@ -100,7 +100,7 @@ describe("drop-focused stage layout", () => {
     expect(phoneStart).toBeGreaterThan(tabletStart);
     const tabletRules = styles.slice(tabletStart, phoneStart);
     expect(tabletRules).toContain(
-      ".app-shell { grid-template:64px minmax(0,1fr) 74px / 210px minmax(410px,1fr); }",
+      ".app-shell { grid-template:64px minmax(0,1fr) / 210px minmax(410px,1fr); }",
     );
     expect(tabletRules).toContain(".inspector-panel { position:fixed;");
   });

@@ -35,12 +35,13 @@ describe("DesignV1Schema", () => {
     expect(DesignV1Schema.safeParse(invalidDimensions).success).toBe(false);
   });
 
-  it("enforces the 5–50 foot continuous height range", () => {
+  it("enforces the 5–100 foot continuous height range", () => {
     expect(DesignV1Schema.safeParse(validDesign({ heightFt: 5 })).success).toBe(true);
     expect(DesignV1Schema.safeParse(validDesign({ heightFt: 27.375 })).success).toBe(true);
     expect(DesignV1Schema.safeParse(validDesign({ heightFt: 50 })).success).toBe(true);
+    expect(DesignV1Schema.safeParse(validDesign({ heightFt: 100 })).success).toBe(true);
     expect(DesignV1Schema.safeParse(validDesign({ heightFt: 4.999 })).success).toBe(false);
-    expect(DesignV1Schema.safeParse(validDesign({ heightFt: 50.001 })).success).toBe(false);
+    expect(DesignV1Schema.safeParse(validDesign({ heightFt: 100.001 })).success).toBe(false);
   });
 
   it("enforces safe, unique IDs and valid joint references", () => {

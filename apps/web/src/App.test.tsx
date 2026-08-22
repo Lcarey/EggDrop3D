@@ -50,6 +50,9 @@ const resetStore = () => useEditorStore.setState({
   runId: 0,
   result: null,
   playbackRate: 0.2,
+  gravityBodyId: "earth",
+  liveEggSpeedMps: 0,
+  peakEggSpeedMps: 0,
   cloud: { id: null, version: null, editToken: null, readOnly: false, saving: false },
 });
 
@@ -87,7 +90,7 @@ describe("EggDrop3D app workflow", () => {
     const dialog = screen.getByRole("dialog", { name: /how high/i });
     const slider = within(dialog).getByRole("slider", { name: "Drop height in feet" });
     expect(slider).toHaveAttribute("min", "5");
-    expect(slider).toHaveAttribute("max", "50");
+    expect(slider).toHaveAttribute("max", "100");
     expect(slider).toHaveAttribute("step", "0.5");
     expect(within(dialog).getByText(/bare-egg baseline/i)).toBeInTheDocument();
 
@@ -97,6 +100,8 @@ describe("EggDrop3D app workflow", () => {
     expect(within(dialog).getByText("27.5")).toBeInTheDocument();
     fireEvent.change(slider, { target: { value: "50" } });
     expect(within(dialog).getByText("50.0")).toBeInTheDocument();
+    fireEvent.change(slider, { target: { value: "100" } });
+    expect(within(dialog).getByText("100.0")).toBeInTheDocument();
   });
 
   it("selects drop speed from 0.1× to 2× and uses it for the run and live label", async () => {
@@ -122,7 +127,7 @@ describe("EggDrop3D app workflow", () => {
     await user.click(within(dialog).getByRole("button", { name: /release contraption/i }));
 
     expect(screen.getByTestId("drop-scene")).toHaveAttribute("data-playback-rate", "1.3");
-    expect(screen.getByText(/Dropping from 15\.0 ft · 1\.3×/)).toBeInTheDocument();
+    expect(screen.getByText(/Dropping from 15\.0 ft on Earth · 1\.3×/)).toBeInTheDocument();
   });
 
   it("runs the bare-egg drop, reports metrics, and resets to edit or drop again", async () => {

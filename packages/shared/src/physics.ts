@@ -7,6 +7,39 @@ import type {
 
 export const FEET_TO_METERS = 0.3048;
 export const STANDARD_GRAVITY_MPS2 = 9.80665;
+
+export const GRAVITY_BODY_IDS = [
+  "moon",
+  "mars",
+  "venus",
+  "earth",
+  "uranus",
+  "neptune",
+  "saturn",
+  "jupiter",
+] as const;
+
+export type GravityBodyId = (typeof GRAVITY_BODY_IDS)[number];
+
+export const DEFAULT_GRAVITY_BODY_ID: GravityBodyId = "earth";
+
+export const GRAVITY_BODIES: Record<
+  GravityBodyId,
+  { label: string; gravityMps2: number }
+> = {
+  moon: { label: "Moon", gravityMps2: 1.62 },
+  mars: { label: "Mars", gravityMps2: 3.72 },
+  venus: { label: "Venus", gravityMps2: 8.87 },
+  earth: { label: "Earth", gravityMps2: STANDARD_GRAVITY_MPS2 },
+  uranus: { label: "Uranus", gravityMps2: 8.69 },
+  neptune: { label: "Neptune", gravityMps2: 11.15 },
+  saturn: { label: "Saturn", gravityMps2: 10.44 },
+  jupiter: { label: "Jupiter", gravityMps2: 24.79 },
+};
+
+export function gravityMps2ForBody(bodyId: GravityBodyId): number {
+  return GRAVITY_BODIES[bodyId].gravityMps2;
+}
 export const SEA_LEVEL_AIR_DENSITY_KG_M3 = 1.225;
 export const DEFAULT_SNAP_METERS = 0.05;
 export const DEFAULT_ROTATION_SNAP_RADIANS = Math.PI / 12;

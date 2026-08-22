@@ -20,7 +20,7 @@ test("inventory and continuous height controls are complete", async ({ page }) =
   const dialog = page.getByRole("dialog", { name: /how high/i });
   const slider = dialog.getByRole("slider", { name: "Drop height in feet" });
   await expect(slider).toHaveAttribute("min", "5");
-  await expect(slider).toHaveAttribute("max", "50");
+  await expect(slider).toHaveAttribute("max", "100");
   await expect(slider).toHaveAttribute("step", "0.5");
 
   await slider.fill("5");
@@ -29,6 +29,17 @@ test("inventory and continuous height controls are complete", async ({ page }) =
   await expect(dialog.locator(".height-readout strong")).toHaveText("27.5");
   await slider.fill("50");
   await expect(dialog.locator(".height-readout strong")).toHaveText("50.0");
+  await slider.fill("100");
+  await expect(dialog.locator(".height-readout strong")).toHaveText("100.0");
+
+  const gravitySlider = dialog.getByRole("slider", { name: "Gravity strength" });
+  await expect(gravitySlider).toHaveAttribute("min", "0");
+  await expect(gravitySlider).toHaveAttribute("max", "7");
+  await expect(gravitySlider).toHaveAttribute("step", "1");
+  await gravitySlider.fill("0");
+  await expect(dialog.getByText("Moon", { exact: true })).toBeVisible();
+  await gravitySlider.fill("7");
+  await expect(dialog.getByText("Jupiter", { exact: true })).toBeVisible();
 
   const speedSlider = dialog.getByRole("slider", { name: "Drop playback speed" });
   await expect(speedSlider).toHaveAttribute("min", "0.1");

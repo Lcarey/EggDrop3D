@@ -1,11 +1,12 @@
 import {
-  AlertTriangle, Box, CheckCircle2, ChevronDown, Copy, Edit3, FlaskConical,
-  Focus, FolderOpen, Gauge, Info, Link2, LoaderCircle, Magnet, Move3D, PackageOpen, Play, Redo2,
+  AlertTriangle, Activity, Box, CheckCircle2, ChevronDown, Copy, Edit3, FlaskConical,
+  Focus, FolderOpen, Gauge, Globe, Info, Link2, LoaderCircle, Magnet, Move3D, PackageOpen, Play, Redo2,
   Rotate3D, RotateCcw, Save, Scale3D, Share2, Sparkles, Trash2, Trophy, Undo2, X,
 } from "lucide-react";
 import {
-  DesignV1Schema, MATERIAL_BY_ID, MISSION_BY_ID, MISSION_CATALOG, calculatePartMassKg,
-  countDesignMaterials, snapScalar, type DesignPartV1, type DesignV1, type PublicDesign, type Transform,
+  DesignV1Schema, GRAVITY_BODY_IDS, GRAVITY_BODIES, MATERIAL_BY_ID, MISSION_BY_ID, MISSION_CATALOG, calculatePartMassKg,
+  countDesignMaterials, gravityMps2ForBody, snapScalar, MAX_DROP_HEIGHT_FT, MIN_DROP_HEIGHT_FT,
+  type DesignPartV1, type DesignV1, type PublicDesign, type Transform,
 } from "@eggdrop/shared";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { Euler, Quaternion } from "three";
@@ -121,6 +122,7 @@ function Inventory({ readOnly, bestScore }: { readOnly: boolean; bestScore: numb
   const connectorDraft = useEditorStore((state) => state.connectorDraft);
   const stage = useEditorStore((state) => state.stage);
   const chooseMaterial = useEditorStore((state) => state.chooseMaterial);
+  const openDropSetup = useEditorStore((state) => state.openDropSetup);
   const counts = useMemo(() => countDesignMaterials(design), [design]);
   const mission = design.mode === "challenge" && design.missionId ? MISSION_BY_ID[design.missionId] : null;
   return (
@@ -162,6 +164,11 @@ function Inventory({ readOnly, bestScore }: { readOnly: boolean; bestScore: numb
           <button aria-label="Cancel connector" onClick={() => chooseMaterial(null)}><X size={14} /></button>
         </div>
       )}
+      <div className="panel-dropzone">
+        <span className="eyebrow">READY WHEN YOU ARE</span>
+        <strong>{design.parts.length ? `${design.parts.length} part${design.parts.length === 1 ? "" : "s"} · ${design.joints.length} connection${design.joints.length === 1 ? "" : "s"}` : "Protect the egg—or test the bare-shell baseline."}</strong>
+        <button className="drop-button" onClick={openDropSetup} disabled={stage !== "build"}><span>↓</span> Set up drop</button>
+      </div>
     </aside>
   );
 }
@@ -283,25 +290,80 @@ function Inspector({ readOnly, onDeleteCloud }: { readOnly: boolean; onDeleteClo
   );
 }
 
+function LiveEggSpeedChip() {
+  const stage = useEditorStore((state) => state.stage);
+  const liveEggSpeedMps = useEditorStore((state) => state.liveEggSpeedMps);
+  const peakEggSpeedMps = useEditorStore((state) => state.peakEggSpeedMps);
+  if (stage !== "dropping") return null;
+  return (
+    <div className="height-chip speed-chip" aria-label="Egg speed">
+      <Activity size={14} />
+      <div className="speed-pair">
+        <div className="speed-metric">
+          <strong>{liveEggSpeedMps.toFixed(1)} m/s</strong>
+          <span>speed</span>
+        </div>
+        <div className="speed-metric">
+          <strong>{peakEggSpeedMps.toFixed(1)} m/s</strong>
+          <span>top</span>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function DropHeightChip() {
+  const design = useEditorStore((state) => state.design);
+  return (
+    <div className="height-chip" aria-label="Drop height">
+      <Gauge size={14} />
+      <strong>{design.heightFt.toFixed(1)} ft</strong>
+      <span>drop</span>
+    </div>
+  );
+}
+
 function DropSetup() {
   const design = useEditorStore((state) => state.design);
   const playbackRate = useEditorStore((state) => state.playbackRate);
+  const gravityBodyId = useEditorStore((state) => state.gravityBodyId);
   const setHeight = useEditorStore((state) => state.setHeight);
   const setPlaybackRate = useEditorStore((state) => state.setPlaybackRate);
+  const setGravityBodyId = useEditorStore((state) => state.setGravityBodyId);
   const cancel = useEditorStore((state) => state.cancelDropSetup);
   const release = useEditorStore((state) => state.release);
   const mission = design.mode === "challenge" && design.missionId ? MISSION_BY_ID[design.missionId] : null;
+  const gravityBody = GRAVITY_BODIES[gravityBodyId];
+  const gravityMps2 = gravityMps2ForBody(gravityBodyId);
+  const gravityIndex = GRAVITY_BODY_IDS.indexOf(gravityBodyId);
+  const heightSpanFt = MAX_DROP_HEIGHT_FT - MIN_DROP_HEIGHT_FT;
   return (
     <div className="modal-backdrop" role="presentation">
       <section className="drop-setup modal-card" role="dialog" aria-modal="true" aria-labelledby="drop-title">
         <button className="modal-close" onClick={cancel} aria-label="Close"><X size={18} /></button>
         <div className="modal-kicker"><Gauge size={16} /> DROP SETUP</div>
         <h2 id="drop-title">How high should we go?</h2>
-        <p>Choose any height from 5 to 50 feet. The whole contraption starts this far above the landing pad.</p>
+        <p>Choose any height from {MIN_DROP_HEIGHT_FT} to {MAX_DROP_HEIGHT_FT} feet. The whole contraption starts this far above the landing pad.</p>
         {design.parts.length === 0 && <div className="bare-warning"><AlertTriangle size={17} /><span>This is a bare-egg baseline drop. It probably won’t end sunny-side up.</span></div>}
         <div className="height-readout"><strong>{design.heightFt.toFixed(1)}</strong><span>feet</span><em>{(design.heightFt * .3048).toFixed(2)} m</em></div>
-        <input className="height-slider" type="range" min="5" max="50" step="0.5" value={design.heightFt} onChange={(event) => setHeight(Number(event.target.value))} aria-label="Drop height in feet" />
-        <div className="slider-labels"><span>5 ft</span>{mission && <b style={{ left: `${((mission.targetHeightFt - 5) / 45) * 100}%` }}>★ {mission.targetHeightFt} ft target</b>}<span>50 ft</span></div>
+        <input className="height-slider" type="range" min={MIN_DROP_HEIGHT_FT} max={MAX_DROP_HEIGHT_FT} step="0.5" value={design.heightFt} onChange={(event) => setHeight(Number(event.target.value))} aria-label="Drop height in feet" />
+        <div className="slider-labels"><span>{MIN_DROP_HEIGHT_FT} ft</span>{mission && <b style={{ left: `${((mission.targetHeightFt - MIN_DROP_HEIGHT_FT) / heightSpanFt) * 100}%` }}>★ {mission.targetHeightFt} ft target</b>}<span>{MAX_DROP_HEIGHT_FT} ft</span></div>
+        <div className="playback-control">
+          <div className="playback-heading"><div><Globe size={14} /><span>Gravity</span></div><strong>{gravityBody.label}</strong></div>
+          <p>Surface gravity from the Moon through Jupiter. Stronger gravity pulls harder and lands faster.</p>
+          <input
+            className="playback-slider"
+            type="range"
+            min={0}
+            max={GRAVITY_BODY_IDS.length - 1}
+            step={1}
+            value={gravityIndex}
+            onChange={(event) => setGravityBodyId(GRAVITY_BODY_IDS[Number(event.target.value)]!)}
+            aria-label="Gravity strength"
+            aria-valuetext={`${gravityBody.label}, ${gravityMps2.toFixed(2)} meters per second squared`}
+          />
+          <div className="playback-labels"><span>Moon</span><span>Earth</span><span>Jupiter</span></div>
+        </div>
         <div className="playback-control">
           <div className="playback-heading"><div><Play size={14} /><span>Playback speed</span></div><strong>{playbackRate.toFixed(1)}×</strong></div>
           <p>Changes how fast you watch. Gravity, damage, metrics, and score stay the same.</p>
@@ -318,7 +380,7 @@ function DropSetup() {
           />
           <div className="playback-labels"><span>0.1× slow</span><span>1× real time</span><span>2× fast</span></div>
         </div>
-        <div className="drop-fact"><Sparkles size={17} /><span>Without air resistance, the fall reaches about <strong>{Math.sqrt(2 * 9.81 * design.heightFt * .3048).toFixed(1)} m/s</strong>.</span></div>
+        <div className="drop-fact"><Sparkles size={17} /><span>Without air resistance, the fall reaches about <strong>{Math.sqrt(2 * gravityMps2 * design.heightFt * .3048).toFixed(1)} m/s</strong> on {gravityBody.label}.</span></div>
         <div className="modal-actions"><button className="secondary" onClick={cancel}>Keep building</button><button className="release-button" onClick={release}><Play size={17} fill="currentColor" /> Release contraption</button></div>
       </section>
     </div>
@@ -367,6 +429,9 @@ export function App() {
   const stage = useEditorStore((state) => state.stage);
   const runId = useEditorStore((state) => state.runId);
   const playbackRate = useEditorStore((state) => state.playbackRate);
+  const gravityBodyId = useEditorStore((state) => state.gravityBodyId);
+  const gravityLabel = GRAVITY_BODIES[gravityBodyId].label;
+  const gravityMps2 = gravityMps2ForBody(gravityBodyId);
   const result = useEditorStore((state) => state.result);
   const cloud = useEditorStore((state) => state.cloud);
   const past = useEditorStore((state) => state.past);
@@ -383,7 +448,6 @@ export function App() {
   const setSnapMode = useEditorStore((state) => state.setSnapMode);
   const deleteSelected = useEditorStore((state) => state.deleteSelected);
   const duplicateSelected = useEditorStore((state) => state.duplicateSelected);
-  const openDropSetup = useEditorStore((state) => state.openDropSetup);
   const finishRun = useEditorStore((state) => state.finishRun);
   const abortRun = useEditorStore((state) => state.abortRun);
   const [fitNonce, setFitNonce] = useState(0);
@@ -577,6 +641,17 @@ export function App() {
         <Brand />
         <ModeControls readOnly={editingLocked} />
         <label className="design-name"><span className="sr-only">Design name</span><input value={design.name} maxLength={60} onChange={(event) => setName(event.target.value)} disabled={editingLocked} /></label>
+        {stage === "dropping" ? (
+          <div className="topbar-drop-status" aria-live="polite">
+            <span className="topbar-live-badge"><i className="status-dot falling" /> PHYSICS LIVE</span>
+            <div className="topbar-drop-details">
+              <strong>Dropping from {design.heightFt.toFixed(1)} ft on {gravityLabel} · {playbackRate.toFixed(1)}× playback</strong>
+              <small>Pinch with two fingers to zoom · camera angle locked · press Esc to quit</small>
+            </div>
+          </div>
+        ) : (
+          <div className="topbar-stats"><span><i className="blue-dot" /> {design.mode === "sandbox" ? "Unlimited sandbox" : MISSION_BY_ID[design.missionId!].label}</span><span><Box size={13} /> {design.parts.length}/100 bodies</span></div>
+        )}
         <div className="top-actions">
           {readOnly ? <button className="remix-button" onClick={remix}><Copy size={15} /> Remix</button> : <button className="my-designs-button" onClick={() => setCloudMenu((open) => !open)}><FolderOpen size={15} /><span>My designs</span></button>}
           {!readOnly && <button className="primary-small" onClick={() => void save()} disabled={cloud.saving}>{cloud.saving ? <LoaderCircle className="spin" size={15} /> : <Save size={15} />}<span>{cloud.id ? "Update" : "Save"}</span></button>}
@@ -586,14 +661,19 @@ export function App() {
       </header>
       <Inventory readOnly={editingLocked} bestScore={design.missionId ? missionBests[design.missionId] ?? null : null} />
       <section className="lab-stage" aria-label="3D building workspace">
-        <div className="stage-toolbar">
-          <span><i className={`status-dot ${stage === "dropping" ? "falling" : ""}`} /> {stage === "build" ? (readOnly ? "VIEW MODE" : "BUILD MODE") : stage === "dropping" ? "PHYSICS LIVE" : stage === "result" ? "TEST COMPLETE" : "DROP SETUP"}</span>
-          {stage === "build" && !readOnly && <><button onClick={undo} disabled={!past.length} title="Undo"><Undo2 size={14} /> Undo</button><button onClick={redo} disabled={!future.length} title="Redo"><Redo2 size={14} /> Redo</button><button className={snapDraft ? "active" : ""} onClick={() => setSnapMode(!snapDraft)} title="Snap ends together" aria-pressed={Boolean(snapDraft)}><Magnet size={14} /> Snap</button><button onClick={() => { if (!design.parts.length || window.confirm("Clear every material and connection?")) clear(); }} title="Clear build"><Trash2 size={14} /> Clear</button></>}
-          {stage === "build" && <button onClick={() => setFitNonce((value) => value + 1)} title="Fit view"><Focus size={14} /> Fit view</button>}
+        {stage !== "dropping" && (
+          <div className="stage-toolbar">
+            <span><i className="status-dot" /> {stage === "build" ? (readOnly ? "VIEW MODE" : "BUILD MODE") : stage === "result" ? "TEST COMPLETE" : "DROP SETUP"}</span>
+            {stage === "build" && !readOnly && <><button onClick={undo} disabled={!past.length} title="Undo"><Undo2 size={14} /> Undo</button><button onClick={redo} disabled={!future.length} title="Redo"><Redo2 size={14} /> Redo</button><button className={snapDraft ? "active" : ""} onClick={() => setSnapMode(!snapDraft)} title="Snap ends together" aria-pressed={Boolean(snapDraft)}><Magnet size={14} /> Snap</button><button onClick={() => { if (!design.parts.length || window.confirm("Clear every material and connection?")) clear(); }} title="Clear build"><Trash2 size={14} /> Clear</button></>}
+            {stage === "build" && <button onClick={() => setFitNonce((value) => value + 1)} title="Fit view"><Focus size={14} /> Fit view</button>}
+          </div>
+        )}
+        <div className="stage-metrics">
+          <DropHeightChip />
+          <LiveEggSpeedChip />
         </div>
-        <div className="height-chip"><Gauge size={14} /><strong>{design.heightFt.toFixed(1)} ft</strong><span>drop</span></div>
         {stage === "dropping" || stage === "result" ? (
-          <DropScene design={design} runId={runId} running={stage === "dropping"} playbackRate={playbackRate} onComplete={finishRun} />
+          <DropScene design={design} runId={runId} running={stage === "dropping"} playbackRate={playbackRate} gravityMps2={gravityMps2} onComplete={finishRun} />
         ) : <BuildScene editable={!editingLocked && stage === "build"} fitNonce={fitNonce} />}
         {stage === "build" && design.parts.length === 0 && !snapDraft && <div className="stage-hint"><strong>Start with the egg</strong><span>Choose a material, then click the grid to place it.</span></div>}
         {stage === "build" && snapDraft && (
@@ -602,15 +682,9 @@ export function App() {
             <span>{snapDraft.bodyA ? "Click near an end of another part — it slides over so the two ends touch. Esc to cancel." : "Click near an end of a part or the egg. That end stays put. Esc to cancel."}</span>
           </div>
         )}
-        {stage === "dropping" && <div className="drop-live"><span>↓</span><div><strong>Dropping from {design.heightFt.toFixed(1)} ft · {playbackRate.toFixed(1)}× playback</strong><small>Pinch with two fingers to zoom · camera angle locked · press Esc to quit</small></div></div>}
         {readOnly && <div className="readonly-banner"><Info size={15} /><span>This shared design is read-only. You can drop it or make your own remix.</span></div>}
       </section>
       {(stage === "build" || stage === "dropSetup") && <Inspector readOnly={editingLocked} onDeleteCloud={() => void removeCloud()} />}
-      <footer className="drop-dock">
-        <div><span className="eyebrow">READY WHEN YOU ARE</span><strong>{design.parts.length ? `${design.parts.length} part${design.parts.length === 1 ? "" : "s"} · ${design.joints.length} connection${design.joints.length === 1 ? "" : "s"}` : "Protect the egg—or test the bare-shell baseline."}</strong></div>
-        <div className="dock-legend"><span><i className="blue-dot" /> {design.mode === "sandbox" ? "Unlimited sandbox" : MISSION_BY_ID[design.missionId!].label}</span><span><Box size={13} /> {design.parts.length}/100 bodies</span></div>
-        <button className="drop-button" onClick={openDropSetup} disabled={stage !== "build"}><span>↓</span> Set up drop</button>
-      </footer>
       <div className="phone-notice"><AlertTriangle size={17} /><div><strong>Small-screen viewer</strong><span>Drop and remix here; use a tablet or computer for precise 3D editing.</span></div></div>
       {stage === "dropSetup" && <DropSetup />}
       {stage === "result" && <ResultModal />}

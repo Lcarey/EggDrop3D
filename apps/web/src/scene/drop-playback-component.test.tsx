@@ -1,3 +1,4 @@
+import { STANDARD_GRAVITY_MPS2 } from "@eggdrop/shared";
 import { act, render, screen } from "@testing-library/react";
 import type { ReactNode } from "react";
 import { TOUCH } from "three";
@@ -6,6 +7,7 @@ import { freshDesign } from "../editor/store";
 import {
   DROP_FIXED_STEP_SECONDS,
   DROP_OUTCOME_REVEAL_SECONDS,
+  DROP_SETTLE_REAL_SECONDS,
   DropScene,
   calculateDropZoomLimits,
 } from "./DropScene";
@@ -54,6 +56,8 @@ const playbackHarness = vi.hoisted(() => ({
     addTorque: () => undefined,
     mass: () => .057,
   },
+  // Per-bodyId rigid-body stand-ins; ids without an entry fall back to eggBody.
+  bodyOverrides: {} as Record<string, unknown>,
 }));
 
 vi.mock("@react-three/fiber", async () => {
@@ -113,10 +117,12 @@ vi.mock("@react-three/drei", async () => {
     });
   });
   return {
+    Billboard: () => null,
     ContactShadows: () => null,
     Line: () => null,
     OrbitControls,
     PerspectiveCamera: () => React.createElement("div", { "data-testid": "drop-camera" }),
+    Text: () => null,
   };
 });
 
@@ -139,8 +145,9 @@ vi.mock("@react-three/rapier", async () => {
     children,
   );
   const RigidBody = React.forwardRef<unknown, { children?: ReactNode; userData?: { bodyId?: string } }>((props, ref) => {
-    React.useImperativeHandle(ref, () => playbackHarness.eggBody);
-    return React.createElement("div", { "data-testid": `body-${props.userData?.bodyId ?? "unknown"}` }, props.children);
+    const bodyId = props.userData?.bodyId;
+    React.useImperativeHandle(ref, () => (bodyId && playbackHarness.bodyOverrides[bodyId]) || playbackHarness.eggBody);
+    return React.createElement("div", { "data-testid": `body-${bodyId ?? "unknown"}` }, props.children);
   });
   const CapsuleCollider = ({ onCollisionEnter }: { onCollisionEnter?: (payload: unknown) => void }) => {
     React.useLayoutEffect(() => {
@@ -254,6 +261,7 @@ describe("DropScene playback presentation", () => {
     playbackHarness.stepEffect = undefined;
     playbackHarness.collision = undefined;
     playbackHarness.zoomControlsProps = undefined;
+    playbackHarness.bodyOverrides = {};
     playbackHarness.eggBody.position = { x: 0, y: 1, z: 0 };
     playbackHarness.eggBody.velocity = { x: 0, y: -10, z: 0 };
     frameState.camera.position = { x: 0, y: 2, z: 0 };
@@ -261,7 +269,7 @@ describe("DropScene playback presentation", () => {
   });
 
   it("keeps the camera and drop scene rendered while physics is held for 500 ms", () => {
-    render(<DropScene design={freshDesign()} runId={1} running playbackRate={0.2} onComplete={vi.fn()} />);
+    render(<DropScene design={freshDesign()} runId={1} running playbackRate={0.2} gravityMps2={STANDARD_GRAVITY_MPS2} onComplete={vi.fn()} />);
 
     expect(screen.getByTestId("drop-canvas")).toBeInTheDocument();
     expect(screen.getByTestId("drop-camera")).toBeInTheDocument();
@@ -273,24 +281,23 @@ describe("DropScene playback presentation", () => {
     advanceFrame(0.001);
     expect(playbackHarness.stepDeltas).toEqual([]);
 
+    // 100 ms at 0.2× playback advances 20 ms of simulation: four 1/240 steps.
     advanceFrame(0.1);
-    expect(playbackHarness.stepDeltas).toEqual([DROP_FIXED_STEP_SECONDS]);
+    expect(playbackHarness.stepDeltas).toEqual(Array(4).fill(DROP_FIXED_STEP_SECONDS));
   });
 
-  it("uses the selected playback rate while keeping every Rapier step fixed at 1/60 second", () => {
-    render(<DropScene design={freshDesign()} runId={1} running playbackRate={2} onComplete={vi.fn()} />);
+  it("uses the selected playback rate while keeping every Rapier step fixed at 1/240 second", () => {
+    render(<DropScene design={freshDesign()} runId={1} running playbackRate={2} gravityMps2={STANDARD_GRAVITY_MPS2} onComplete={vi.fn()} />);
 
     advanceFrame(0.5);
     expect(playbackHarness.stepDeltas).toEqual([]);
+    // One 60 Hz render frame at 2× playback advances 1/30 s: eight 1/240 steps.
     advanceFrame(1 / 60);
-    expect(playbackHarness.stepDeltas).toEqual([
-      DROP_FIXED_STEP_SECONDS,
-      DROP_FIXED_STEP_SECONDS,
-    ]);
+    expect(playbackHarness.stepDeltas).toEqual(Array(8).fill(DROP_FIXED_STEP_SECONDS));
   });
 
   it("enables pinch zoom during a drop while keeping camera rotation and panning locked", () => {
-    render(<DropScene design={freshDesign()} runId={1} running playbackRate={0.2} onComplete={vi.fn()} />);
+    render(<DropScene design={freshDesign()} runId={1} running playbackRate={0.2} gravityMps2={STANDARD_GRAVITY_MPS2} onComplete={vi.fn()} />);
 
     expect(screen.getByTestId("drop-zoom-controls")).toHaveAttribute("data-enable-zoom", "true");
     expect(screen.getByTestId("drop-zoom-controls")).toHaveAttribute("data-enable-rotate", "false");
@@ -315,7 +322,7 @@ describe("DropScene playback presentation", () => {
   });
 
   it("preserves the user's pinch-zoom distance while the camera follows the falling egg", () => {
-    render(<DropScene design={freshDesign()} runId={1} running playbackRate={0.2} onComplete={vi.fn()} />);
+    render(<DropScene design={freshDesign()} runId={1} running playbackRate={0.2} gravityMps2={STANDARD_GRAVITY_MPS2} onComplete={vi.fn()} />);
 
     // Establish the camera target during the motionless release hold, then
     // emulate OrbitControls moving the camera farther from that target.
@@ -342,15 +349,15 @@ describe("DropScene playback presentation", () => {
     expect(followedDistance).toBeCloseTo(zoomedDistance, 4);
   });
 
-  it("feeds the egg visual and camera a smooth 60 Hz pose between 12 Hz physics samples", () => {
-    render(<DropScene design={freshDesign()} runId={1} running playbackRate={0.2} onComplete={vi.fn()} />);
+  it("feeds the egg visual and camera a smooth 60 Hz pose between physics samples", () => {
+    render(<DropScene design={freshDesign()} runId={1} running playbackRate={0.2} gravityMps2={STANDARD_GRAVITY_MPS2} onComplete={vi.fn()} />);
     const eggVisualGroup = screen.getByTestId("egg-visual").parentElement!;
     advanceFrame(.5);
     // Keep the fake Rapier body aligned with the design's height before
     // applying per-step motion; the real body is initialized at this pose.
     playbackHarness.eggBody.position.y = playbackHarness.visualObjects.get(eggVisualGroup)!.position.y;
     playbackHarness.stepEffect = () => {
-      playbackHarness.eggBody.position.y -= .1;
+      playbackHarness.eggBody.position.y -= .025;
     };
 
     const cameraTargetY: number[] = [];
@@ -379,7 +386,7 @@ describe("DropScene playback presentation", () => {
 
   it("reveals the visible cracked state before publishing the result", () => {
     const onComplete = vi.fn();
-    render(<DropScene design={freshDesign()} runId={1} running playbackRate={0.2} onComplete={onComplete} />);
+    render(<DropScene design={freshDesign()} runId={1} running playbackRate={0.2} gravityMps2={STANDARD_GRAVITY_MPS2} onComplete={onComplete} />);
 
     advanceFrame(0.5);
     advanceFrame(0.1);
@@ -450,7 +457,7 @@ describe("DropScene playback presentation", () => {
     ];
     const onComplete = vi.fn();
 
-    render(<DropScene design={design} runId={1} running playbackRate={0.2} onComplete={onComplete} />);
+    render(<DropScene design={design} runId={1} running playbackRate={0.2} gravityMps2={STANDARD_GRAVITY_MPS2} onComplete={onComplete} />);
 
     // The assembled contraption gets the same motionless release hold as a
     // bare egg; connector setup must not skip straight to the result screen.
@@ -486,5 +493,63 @@ describe("DropScene playback presentation", () => {
     advanceFrame(0.01);
     expect(onComplete).toHaveBeenCalledTimes(1);
     expect(onComplete.mock.calls[0]?.[0]).toMatchObject({ outcome: "cracked" });
+  });
+
+  it("wins 3 real seconds after the egg rests on the ground even while another part keeps moving", () => {
+    const design = freshDesign();
+    design.heightFt = 5;
+    design.parts = [
+      {
+        id: "straw-loose",
+        materialId: "straw",
+        transform: {
+          position: [0.4, 0.02, 0],
+          rotation: [0, 0, 0, 1],
+          dimensions: [0.2, 0.012, 0.012],
+        },
+      },
+    ];
+    // A loose straw that never settles: under the old all-bodies rule this
+    // would hold the verdict hostage until the 20 s simulation timeout.
+    const looseStrawBody = {
+      position: { x: 0.4, y: 0.02, z: 0 },
+      velocity: { x: 2, y: 0, z: 2 },
+      translation() { return { ...this.position }; },
+      linvel() { return { ...this.velocity }; },
+      angvel: () => ({ x: 0, y: 0, z: 6 }),
+      rotation: () => ({ x: 0, y: 0, z: 0, w: 1 }),
+      isSleeping: () => false,
+      resetForces: () => undefined,
+      resetTorques: () => undefined,
+      addForce: () => undefined,
+      addForceAtPoint: () => undefined,
+      addTorque: () => undefined,
+      mass: () => .001,
+    };
+    playbackHarness.bodyOverrides["straw-loose"] = looseStrawBody;
+    const onComplete = vi.fn();
+
+    render(<DropScene design={design} runId={1} running playbackRate={0.2} gravityMps2={STANDARD_GRAVITY_MPS2} onComplete={onComplete} />);
+    advanceFrame(0.499);
+    advanceFrame(0.001);
+
+    // The egg comes to rest on the ground immediately after release.
+    playbackHarness.eggBody.position = { x: 0, y: 0.03, z: 0 };
+    playbackHarness.eggBody.velocity = { x: 0, y: 0, z: 0 };
+
+    // At 0.2× playback the 0.35 s simulation-time startup guard lasts 1.75
+    // real seconds; the settle timer then counts real (wall-clock) time.
+    const guardFrames = Math.ceil(0.35 / 0.2 * 60);
+    for (let frame = 0; frame < guardFrames; frame += 1) advanceFrame(1 / 60);
+    // Just under the settle threshold: no verdict yet.
+    for (let frame = 0; frame < (DROP_SETTLE_REAL_SECONDS - 0.25) * 60; frame += 1) advanceFrame(1 / 60);
+    expect(onComplete).not.toHaveBeenCalled();
+
+    // Crossing 3 real seconds of egg stillness queues the survived verdict.
+    for (let frame = 0; frame < 0.5 * 60; frame += 1) advanceFrame(1 / 60);
+    expect(onComplete).not.toHaveBeenCalled();
+    advanceFrame(DROP_OUTCOME_REVEAL_SECONDS + 0.05);
+    expect(onComplete).toHaveBeenCalledTimes(1);
+    expect(onComplete.mock.calls[0]?.[0]).toMatchObject({ outcome: "survived" });
   });
 });

@@ -5,8 +5,10 @@ import {
   MAX_PARTS,
   MISSION_BY_ID,
   countDesignMaterials,
+  DEFAULT_GRAVITY_BODY_ID,
   type DesignV1,
   type DropResult,
+  type GravityBodyId,
   type JointMaterialId,
   type MaterialId,
   type Transform,
@@ -144,6 +146,9 @@ type EditorStore = {
   runId: number;
   result: DropResult | null;
   playbackRate: number;
+  gravityBodyId: GravityBodyId;
+  liveEggSpeedMps: number;
+  peakEggSpeedMps: number;
   cloud: CloudState;
   setDesign: (design: DesignV1) => void;
   setCloud: (cloud: Partial<CloudState>) => void;
@@ -152,6 +157,7 @@ type EditorStore = {
   setModeAndMission: (mode: DesignV1["mode"], missionId: DesignV1["missionId"], heightFt: number) => void;
   setHeight: (heightFt: number) => void;
   setPlaybackRate: (playbackRate: number) => void;
+  setGravityBodyId: (gravityBodyId: GravityBodyId) => void;
   chooseMaterial: (materialId: MaterialId | null) => void;
   placePart: (materialId: MaterialId, position: [number, number, number]) => void;
   beginOrFinishConnector: (bodyId: string, anchor: [number, number, number]) => void;
@@ -188,6 +194,9 @@ export const useEditorStore = create<EditorStore>((set, get) => ({
   runId: 0,
   result: null,
   playbackRate: DEFAULT_DROP_PLAYBACK_RATE,
+  gravityBodyId: DEFAULT_GRAVITY_BODY_ID,
+  liveEggSpeedMps: 0,
+  peakEggSpeedMps: 0,
   cloud: { id: null, version: null, editToken: null, readOnly: false, saving: false },
   setDesign: (design) => set(() => {
     const next = clone(design);
@@ -211,6 +220,7 @@ export const useEditorStore = create<EditorStore>((set, get) => ({
   }),
   setHeight: (heightFt) => set((state) => ({ design: { ...state.design, heightFt } })),
   setPlaybackRate: (playbackRate) => set({ playbackRate: normalizeDropPlaybackRate(playbackRate) }),
+  setGravityBodyId: (gravityBodyId) => set({ gravityBodyId }),
   chooseMaterial: (materialId) => set({
     activeMaterial: materialId,
     selectedId: null,
@@ -357,12 +367,12 @@ export const useEditorStore = create<EditorStore>((set, get) => ({
   }),
   openDropSetup: () => set({ stage: "dropSetup", selectedId: null, activeMaterial: null, connectorDraft: null, snapDraft: null }),
   cancelDropSetup: () => set({ stage: "build" }),
-  release: () => set((state) => ({ stage: "dropping", runId: state.runId + 1, result: null })),
+  release: () => set((state) => ({ stage: "dropping", runId: state.runId + 1, result: null, liveEggSpeedMps: 0, peakEggSpeedMps: 0 })),
   // Ignore completions that land after the user quit the run with Escape.
-  finishRun: (result) => set((state) => (state.stage === "dropping" ? { stage: "result", result } : state)),
-  abortRun: () => set((state) => (state.stage === "dropping" ? { stage: "build", result: null } : state)),
-  dropAgain: () => set((state) => ({ stage: "dropping", runId: state.runId + 1, result: null })),
-  editBuild: () => set({ stage: "build", result: null, selectedId: "egg" }),
+  finishRun: (result) => set((state) => (state.stage === "dropping" ? { stage: "result", result, liveEggSpeedMps: 0, peakEggSpeedMps: 0 } : state)),
+  abortRun: () => set((state) => (state.stage === "dropping" ? { stage: "build", result: null, liveEggSpeedMps: 0, peakEggSpeedMps: 0 } : state)),
+  dropAgain: () => set((state) => ({ stage: "dropping", runId: state.runId + 1, result: null, liveEggSpeedMps: 0, peakEggSpeedMps: 0 })),
+  editBuild: () => set({ stage: "build", result: null, selectedId: "egg", liveEggSpeedMps: 0, peakEggSpeedMps: 0 }),
 }));
 
 export const getBodyTransform = (design: DesignV1, id: string): Transform | undefined =>

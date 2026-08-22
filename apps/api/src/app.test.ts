@@ -190,7 +190,7 @@ describe("design API", () => {
 
   it("returns structured schema validation errors", async () => {
     const { app } = testApp();
-    const response = await createDesign(app, design({ name: "", heightFt: 51 }));
+    const response = await createDesign(app, design({ name: "", heightFt: 101 }));
 
     expect(response.status).toBe(400);
     const body = (await response.json()) as ApiErrorBody;
